@@ -1,0 +1,2730 @@
+import sys
+import asyncio
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import urllib.parse
+import socket
+import requests
+import re
+import time
+import threading
+import os
+import struct
+import json
+import platform
+import webbrowser
+import secrets
+import base64
+import queue
+import random
+import logging
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from typing import Optional, Dict, Tuple, List, Any
+from ipaddress import ip_address, ip_network
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate, ConnectionTcpFull
+from telethon.errors import AuthKeyUnregisteredError, UnauthorizedError
+
+if sys.platform == 'win32':
+    try:
+        from asyncio.proactor_events import _ProactorBasePipeTransport
+        _orig_call_connection_lost = getattr(_ProactorBasePipeTransport, '_call_connection_lost', None)
+        if _orig_call_connection_lost is not None:
+            def _safe_call_connection_lost(self, exc):
+                try:
+                    _orig_call_connection_lost(self, exc)
+                except (ConnectionResetError, OSError):
+                    try:
+                        self._sock = None
+                    except Exception:
+                        pass
+            _ProactorBasePipeTransport._call_connection_lost = _safe_call_connection_lost
+    except Exception:
+        pass
+
+if hasattr(sys, 'unraisablehook'):
+    _orig_unraisablehook = sys.unraisablehook
+    def _safe_unraisablehook(unraisable):
+        try:
+            if unraisable.exc_type is RuntimeError and unraisable.exc_value and "Event loop is closed" in str(unraisable.exc_value):
+                return
+        except Exception:
+            pass
+        try:
+            _orig_unraisablehook(unraisable)
+        except Exception:
+            pass
+    sys.unraisablehook = _safe_unraisablehook
+
+try:
+    import asyncio.streams
+    _orig_sw_del = getattr(asyncio.streams.StreamWriter, '__del__', None)
+    if _orig_sw_del:
+        def _safe_sw_del(self):
+            try:
+                if getattr(self, '_transport', None) and not self._transport.is_closing():
+                    if getattr(self._transport, '_loop', None) and self._transport._loop.is_closed():
+                        return
+                    self.close()
+            except Exception:
+                pass
+        asyncio.streams.StreamWriter.__del__ = _safe_sw_del
+except Exception:
+    pass
+
+try:
+    from Crypto.Cipher import AES as _AES
+    HAS_PYCRYPTODOME = True
+except ImportError:
+    HAS_PYCRYPTODOME = False
+
+try:
+    from cryptography.hazmat.primitives.ciphers import Cipher as _Cipher, algorithms as _alg, modes as _modes
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    HAS_CRYPTOGRAPHY = False
+
+try:
+    import socks as _pysocks
+    HAS_PYSOCKS = True
+except ImportError:
+    HAS_PYSOCKS = False
+
+try:
+    from curl_cffi import requests as _cffi_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+
+logging.getLogger('telethon').setLevel(logging.CRITICAL)
+logging.getLogger('asyncio').setLevel(logging.CRITICAL)
+
+VERSION = "1.2.5"
+
+GEO_API_URLS = [
+    "http://ip-api.com/json/{}?lang=ru",
+    "https://ipapi.co/{}/json/",
+    "https://ipwho.is/{}?lang=ru",
+    "https://freeipapi.com/api/json/{}",
+]
+
+DEFAULT_TIMEOUT = 10
+MAX_WORKERS = 100
+GEO_REQUEST_DELAY = 0.1
+DNS_CACHE_TTL = 600
+
+_DNS_FAIL = '__DNS_FAIL__'
+
+MT_PROTO_SECRET_TYPES = {
+    'plain': '',
+    'padded': 'dd',
+    'fake_tls': 'ee'
+}
+
+TELEGRAM_IP_RANGES = [
+    "149.154.160.0/20", "91.108.4.0/22", "91.108.8.0/21",
+    "91.108.56.0/22", "91.105.192.0/23", "95.161.64.0/20",
+    "185.76.151.0/24", "91.108.12.0/22", "91.108.16.0/22",
+    "91.108.20.0/22"
+]
+
+GOVERNMENT_SNI_PATTERNS = [
+    "duma.{region}.ru", "school{i}.{region}.ru", "mbou{i}.{region}.ru",
+    "ds{i}.{region}.ru", "dou{i}.{region}.ru", "gp{i}.{region}.ru",
+    "gkb{i}.{region}.ru", "mou{i}.{region}.ru", "mdou{i}.{region}.ru",
+    "adm.{region}.ru", "admin.{region}.ru", "gov.{region}.ru",
+    "mfc.{region}.ru", "zdrav.{region}.ru", "edu.{region}.ru",
+    "minobr.{region}.ru", "med.{region}.ru", "sport.{region}.ru",
+    "lib.{region}.ru", "museum.{region}.ru", "culture.{region}.ru",
+    "sud.{region}.ru", "zaksobr.{region}.ru", "gorset.{region}.ru",
+    "vodokanal.{region}.ru", "energo.{region}.ru", "teatr.{region}.ru",
+]
+
+BS_COMPAT_SNI_RU = frozenset([
+    "00.img.avito.st", "01.img.avito.st", "02.img.avito.st", "03.img.avito.st",
+    "04.img.avito.st", "05.img.avito.st", "06.img.avito.st", "07.img.avito.st",
+    "08.img.avito.st", "09.img.avito.st", "10.img.avito.st", "11.img.avito.st",
+    "12.img.avito.st", "13.img.avito.st", "14.img.avito.st", "15.img.avito.st",
+    "16.img.avito.st", "17.img.avito.st", "18.img.avito.st", "19.img.avito.st",
+    "1l-api.mail.ru", "1l-go.mail.ru", "1l-hit.mail.ru", "1l-s2s.mail.ru",
+    "1l-view.mail.ru", "1l.mail.ru", "1link.mail.ru", "20.img.avito.st",
+    "2018.mail.ru", "2019.mail.ru", "2020.mail.ru", "2021.mail.ru",
+    "21.img.avito.st", "22.img.avito.st", "23.img.avito.st", "23feb.mail.ru",
+    "24.img.avito.st", "25.img.avito.st", "26.img.avito.st", "27.img.avito.st",
+    "28.img.avito.st", "29.img.avito.st", "2gis.com", "2gis.ru",
+    "30.img.avito.st", "300.ya.ru", "31.img.avito.st", "32.img.avito.st",
+    "33.img.avito.st", "34.img.avito.st", "3475482542.mc.yandex.ru",
+    "35.img.avito.st", "36.img.avito.st", "37.img.avito.st", "38.img.avito.st",
+    "39.img.avito.st", "40.img.avito.st", "41.img.avito.st", "42.img.avito.st",
+    "43.img.avito.st", "44.img.avito.st", "45.img.avito.st", "46.img.avito.st",
+    "47.img.avito.st", "48.img.avito.st", "49.img.avito.st", "50.img.avito.st",
+    "51.img.avito.st", "52.img.avito.st", "53.img.avito.st", "54.img.avito.st",
+    "55.img.avito.st", "56.img.avito.st", "57.img.avito.st", "58.img.avito.st",
+    "59.img.avito.st", "60.img.avito.st", "61.img.avito.st", "62.img.avito.st",
+    "63.img.avito.st", "64.img.avito.st", "65.img.avito.st", "66.img.avito.st",
+    "67.img.avito.st", "68.img.avito.st", "69.img.avito.st", "70.img.avito.st",
+    "71.img.avito.st", "72.img.avito.st", "73.img.avito.st", "74.img.avito.st",
+    "742231.ms.ok.ru", "75.img.avito.st", "76.img.avito.st", "77.img.avito.st",
+    "78.img.avito.st", "79.img.avito.st", "80.img.avito.st", "81.img.avito.st",
+    "82.img.avito.st", "83.img.avito.st", "84.img.avito.st", "85.img.avito.st",
+    "86.img.avito.st", "87.img.avito.st", "88.img.avito.st", "89.img.avito.st",
+    "8mar.mail.ru", "8march.mail.ru", "90.img.avito.st", "91.img.avito.st",
+    "92.img.avito.st", "93.img.avito.st", "94.img.avito.st", "95.img.avito.st",
+    "96.img.avito.st", "97.img.avito.st", "98.img.avito.st", "99.img.avito.st",
+    "9may.mail.ru", "a.auth-nsdi.ru", "a.res-nsdi.ru", "a.wb.ru",
+    "aa.mail.ru", "adm.digital.gov.ru", "adm.mp.rzd.ru", "admin.cs7777.vk.ru",
+    "admin.tau.vk.ru", "ads.vk.ru", "adv.ozon.ru", "afisha.mail.ru",
+    "agent.mail.ru", "akashi.vk-portal.net", "alfa-mobile.alfabank.ru",
+    "alfabank.ru", "alpha3.minigames.mail.ru", "alpha4.minigames.mail.ru",
+    "amigo.mail.ru", "ams2-cdn.2gis.com", "an.yandex.ru", "analytics.predict.mail.ru",
+    "analytics.vk.ru", "answer.mail.ru", "answers.mail.ru", "api-maps.yandex.ru",
+    "api.2gis.ru", "api.avito.ru", "api.browser.yandex.com", "api.browser.yandex.ru",
+    "api.cs7777.vk.ru", "api.dobro.ru", "api.events.plus.yandex.net", "api.evotor.ru",
+    "api.hrlink.ru", "api.lizaalert.org", "api.max.ru", "api.ok.ru",
+    "api.photo.2gis.com", "api.plus.kinopoisk.ru", "api.predict.mail.ru",
+    "api.reviews.2gis.com", "api.roskachestvo.gov.ru", "api.s3.yandex.net",
+    "api.tau.vk.ru", "api.uxfeedback.yandex.net", "api.vk.ru", "app.hrlink.ru",
+    "apps.research.mail.ru", "authdl.mail.ru", "auto.mail.ru", "auto.ru",
+    "autodiscover.corp.mail.ru", "autodiscover.ord.ozon.ru", "av.mail.ru",
+    "avatars.mds.yandex.com", "avatars.mds.yandex.net", "avito.ru", "avito.st",
+    "aw.mail.ru", "away.cs7777.vk.ru", "away.tau.vk.ru", "azt.mail.ru",
+    "b.auth-nsdi.ru", "b.res-nsdi.ru", "bank.ozon.ru", "banners-website.wildberries.ru",
+    "bb.mail.ru", "bd.mail.ru", "beko.dom.mail.ru", "bender.mail.ru",
+    "beta.mail.ru", "bfds.sberbank.ru", "bitva.mail.ru", "biz.mail.ru",
+    "blackfriday.mail.ru", "blog.mail.ru", "bot.gosuslugi.ru", "botapi.max.ru",
+    "bratva-mr.mail.ru", "bro-bg-store.s3.yandex.com", "bro-bg-store.s3.yandex.net",
+    "bro-bg-store.s3.yandex.ru", "brontp-pre.yandex.ru", "browser.mail.ru",
+    "browser.yandex.com", "browser.yandex.ru", "business.vk.ru", "cabinet.evotor.ru",
+    "calendar.mail.ru", "capsula.mail.ru", "cargo.rzd.ru", "cars.mail.ru",
+    "catalog.api.2gis.com", "cdn.connect.mail.ru", "cdn.lemanapro.ru",
+    "cdn.newyear.mail.ru", "cdn.s3.yandex.net", "cdn.tbank.ru", "cdn.yandex.ru",
+    "cdnrhkgfkkpupuotntfj.svc.cdn.yandex.net", "cf.mail.ru", "chat-prod.wildberries.ru",
+    "chat3.vtb.ru", "cloud.cdn.yandex.com", "cloud.cdn.yandex.net", "cloud.cdn.yandex.ru",
+    "cloud.mail.ru", "cloud.vk.com", "cloud.vk.ru", "cloudcdn-ams19.cdn.yandex.net",
+    "cloudcdn-m9-10.cdn.yandex.net", "cloudcdn-m9-12.cdn.yandex.net", "cloudcdn-m9-13.cdn.yandex.net",
+    "cloudcdn-m9-14.cdn.yandex.net", "cloudcdn-m9-15.cdn.yandex.net", "cloudcdn-m9-2.cdn.yandex.net",
+    "cloudcdn-m9-3.cdn.yandex.net", "cloudcdn-m9-4.cdn.yandex.net", "cloudcdn-m9-5.cdn.yandex.net",
+    "cloudcdn-m9-6.cdn.yandex.net", "cloudcdn-m9-7.cdn.yandex.net", "cloudcdn-m9-9.cdn.yandex.net",
+    "cms-res-web.online.sberbank.ru", "cobma.mail.ru", "cobmo.mail.ru", "cobrowsing.tbank.ru",
+    "code.mail.ru", "codefest.mail.ru", "cog.mail.ru", "collections.yandex.com",
+    "collections.yandex.ru", "comba.mail.ru", "combu.mail.ru", "commba.mail.ru",
+    "company.rzd.ru", "compute.mail.ru", "connect.cs7777.vk.ru", "contacts.rzd.ru",
+    "contract.gosuslugi.ru", "corp.mail.ru", "cpg.money.mail.ru", "crazypanda.mail.ru",
+    "crowdtest.payment-widget-smarttv.plus.tst.kinopoisk.ru", "crowdtest.payment-widget.plus.tst.kinopoisk.ru",
+    "cs.avito.ru", "cs7777.vk.ru", "csp.yandex.net", "ctlog.mail.ru",
+    "ctlog2023.mail.ru", "ctlog2024.mail.ru", "cto.mail.ru", "cups.mail.ru",
+    "d-assets.2gis.ru", "da-preprod.biz.mail.ru", "da.biz.mail.ru", "data.amigo.mail.ru",
+    "dating.ok.ru", "deti.mail.ru", "dev.cs7777.vk.ru", "dev.max.ru",
+    "dev.tau.vk.ru", "dev1.mail.ru", "dev2.mail.ru", "dev3.mail.ru",
+    "digital.gov.ru", "disk.2gis.com", "disk.rzd.ru", "dk.mail.ru",
+    "dl.mail.ru", "dl.marusia.mail.ru", "dmp.dmpkit.lemanapro.ru", "dn.mail.ru",
+    "dnd.wb.ru", "dobro.mail.ru", "dobro.ru", "doc.mail.ru", "dom.mail.ru",
+    "download.max.ru", "dr.yandex.net", "dr2.yandex.net", "dragonpals.mail.ru",
+    "ds.mail.ru", "duck.mail.ru", "duma.gov.ru", "dzen.ru",
+    "e.mail.ru", "edu.sirius.online", "education.mail.ru", "egress.yandex.net",
+    "eh.vk.com", "ekmp-a-51.rzd.ru", "enterprise.api-maps.yandex.ru", "epp.genproc.gov.ru",
+    "esa-res.online.sberbank.ru", "esc.predict.mail.ru", "esia.gosuslugi.ru", "et.mail.ru",
+    "evotor.ru", "expert.vk.ru", "external-api.mediabilling.kinopoisk.ru", "external-api.plus.kinopoisk.ru",
+    "favicon.yandex.com", "favicon.yandex.net", "favicon.yandex.ru", "favorites.api.2gis.com",
+    "fe.mail.ru", "filekeeper-vod.2gis.com", "finance.mail.ru", "finance.wb.ru",
+    "five.predict.mail.ru", "foto.mail.ru", "frontend.vh.yandex.ru", "fw.wb.ru",
+    "games-bamboo.mail.ru", "games-fisheye.mail.ru", "games.mail.ru", "gazeta.ru",
+    "genesis.mail.ru", "geo-apart.predict.mail.ru", "gibdd.mail.ru", "go.mail.ru",
+    "golos.mail.ru", "gosuslugi.ru", "gosweb.gosuslugi.ru", "government.ru",
+    "goya.rutube.ru", "gpb.finance.mail.ru", "graphql-web.kinopoisk.ru", "graphql.kinopoisk.ru",
+    "gu-st.ru", "guns.mail.ru", "hd.kinopoisk.ru", "health.mail.ru", "help.max.ru",
+    "help.mcs.mail.ru", "hi-tech.mail.ru", "horo.mail.ru", "hrc.tbank.ru",
+    "hrlink.ru", "hs.mail.ru", "http-check-headers.yandex.ru", "i.max.ru",
+    "i0.photo.2gis.com", "i1.photo.2gis.com", "i2.photo.2gis.com", "i3.photo.2gis.com",
+    "i4.photo.2gis.com", "i5.photo.2gis.com", "i6.photo.2gis.com", "i7.photo.2gis.com",
+    "i8.photo.2gis.com", "i9.photo.2gis.com", "id.cs7777.vk.ru", "id.sber.ru",
+    "id.tau.vk.ru", "id.tbank.ru", "id.vk.ru", "imgproxy.cdn-tinkoff.ru",
+    "imperia.mail.ru", "informer.yandex.ru", "infra.mail.ru", "internet.mail.ru",
+    "invest.ozon.ru", "ir.ozone.ru", "it.mail.ru", "izbirkom.ru",
+    "jam.api.2gis.com", "jd.mail.ru", "jitsi.wb.ru", "journey.mail.ru",
+    "juggermobile.mail.ru", "junior.mail.ru", "keys.api.2gis.com", "kicker.mail.ru",
+    "kiks.yandex.com", "kiks.yandex.ru", "kingdomrift.mail.ru", "kino.mail.ru",
+    "knights.mail.ru", "kobma.mail.ru", "kobmo.mail.ru", "komba.mail.ru",
+    "kombo.mail.ru", "kombu.mail.ru", "kommba.mail.ru", "konflikt.mail.ru",
+    "kp.ru", "kremlin.ru", "kz.mcs.mail.ru", "la.mail.ru",
+    "lady.mail.ru", "land.dobro.ru", "landing.mail.ru", "le.tbank.ru",
+    "learning.ozon.ru", "legal.max.ru", "legenda.mail.ru", "legendofheroes.mail.ru",
+    "lemanapro.ru", "lenta.ru", "link.max.ru", "link.mp.rzd.ru",
+    "live.ok.ru", "lizaalert.org", "lk.gosuslugi.ru", "loa.mail.ru",
+    "log.strm.yandex.ru", "login.cs7777.vk.ru", "login.tau.vk.ru", "login.vk.com",
+    "login.vk.ru", "lotro.mail.ru", "love.mail.ru", "m.47news.ru",
+    "m.avito.ru", "m.cs7777.vk.ru", "m.ok.ru", "m.tau.vk.ru",
+    "m.vk.ru", "m.vkvideo.cs7777.vk.ru", "ma.kinopoisk.ru", "mail.yandex.com",
+    "mail.yandex.ru", "mailer.mail.ru", "mailexpress.mail.ru", "man.mail.ru",
+    "map.gosuslugi.ru", "mapgl.2gis.com", "mapi.learning.ozon.ru", "maps.mail.ru",
+    "market.rzd.ru", "marusia.mail.ru", "max.ru", "mc.yandex.com",
+    "mc.yandex.ru", "mcs.mail.ru", "me.cs7777.vk.ru", "media-golos.mail.ru",
+    "media.mail.ru", "mediafeeds.yandex.com", "mediafeeds.yandex.ru", "mediapro.mail.ru",
+    "merch-cpg.money.mail.ru", "metrics.alfabank.ru", "microapps.kinopoisk.ru", "miniapp.internal.myteam.mail.ru",
+    "minigames.mail.ru", "mking.mail.ru", "mobfarm.mail.ru", "money.mail.ru",
+    "moskva.taximaxim.ru", "mosqa.mail.ru", "mowar.mail.ru", "mozilla.mail.ru",
+    "mp.rzd.ru", "ms.cs7777.vk.ru", "msk.t2.ru", "multitest.ok.ru",
+    "music.vk.ru", "my.mail.ru", "my.rzd.ru", "myteam.mail.ru",
+    "nebogame.mail.ru", "net.mail.ru", "neuro.translate.yandex.ru", "new.mail.ru",
+    "news.mail.ru", "newyear.mail.ru", "newyear2018.mail.ru", "nonstandard.sales.mail.ru",
+    "notes.mail.ru", "novorossiya.gosuslugi.ru", "oauth.cs7777.vk.ru", "oauth.tau.vk.ru",
+    "oauth2.cs7777.vk.ru", "octavius.mail.ru", "ofd.ru", "oneclick-payment.kinopoisk.ru",
+    "onf.ru", "online.sberbank.ru", "operator.mail.ru", "ord.ozon.ru",
+    "ord.vk.ru", "otvet.mail.ru", "otveti.mail.ru", "otvety.mail.ru",
+    "owa.ozon.ru", "ozon.ru", "panzar.mail.ru", "park.mail.ru",
+    "partners.gosuslugi.ru", "partners.lemanapro.ru", "pay.mail.ru", "pay.ozon.ru",
+    "payment-widget-smarttv.plus.kinopoisk.ru", "payment-widget.kinopoisk.ru", "payment-widget.plus.kinopoisk.ru",
+    "pernatsk.mail.ru", "pets.mail.ru", "pic.rutubelist.ru", "pl-res.online.sberbank.ru",
+    "platform.ofd.ru", "pms.mail.ru", "pochta.ru", "pochtabank.mail.ru",
+    "pogoda.mail.ru", "pokerist.mail.ru", "polis.mail.ru", "pos.gosuslugi.ru",
+    "pp.mail.ru", "pptest.userapi.com", "predict.mail.ru", "preview.rutube.ru",
+    "primeworld.mail.ru", "privacy-cs.mail.ru", "prodvizhenie.rzd.ru", "ptd.predict.mail.ru",
+    "pubg.mail.ru", "public-api.reviews.2gis.com", "public.infra.mail.ru", "pulse.mail.ru",
+    "pulse.mp.rzd.ru", "push.vk.ru", "pw.mail.ru", "quantum.mail.ru",
+    "queuev4.vk.com", "quiz.kinopoisk.ru", "r.vk.ru", "r0.mradx.net",
+    "rambler.ru", "rate.mail.ru", "rbc.ru", "rebus.calls.mail.ru",
+    "rebus.octavius.mail.ru", "receive-sentry.lmru.tech", "reseach.mail.ru", "rev.mail.ru",
+    "riot.mail.ru", "rl.mail.ru", "rm.mail.ru", "roskachestvo.gov.ru",
+    "rs.mail.ru", "rt.api.operator.mail.ru", "rutube.ru", "rzd.ru",
+    "s.vtb.ru", "s0.bss.2gis.com", "s1.bss.2gis.com", "s3.babel.mail.ru",
+    "s3.mail.ru", "s3.media-mobs.mail.ru", "s3.t2.ru", "s3.yandex.net",
+    "sales.mail.ru", "sangels.mail.ru", "sba.yandex.com", "sba.yandex.net",
+    "sba.yandex.ru", "sberbank.ru", "sdk.money.mail.ru", "secure-cloud.rzd.ru",
+    "secure.rzd.ru", "securepay.ozon.ru", "security.mail.ru", "seller.ozon.ru",
+    "service.amigo.mail.ru", "sfd.gosuslugi.ru", "shadowbound.mail.ru", "sntr.avito.ru",
+    "socdwar.mail.ru", "sochi-park.predict.mail.ru", "sochisirius.ru", "souz.mail.ru",
+    "speller.yandex.net", "sphere.mail.ru", "sport.mail.ru", "sso-app4.vtb.ru",
+    "sso-app5.vtb.ru", "sso.auto.ru", "sso.dzen.ru", "sso.kinopoisk.ru",
+    "ssp.rutube.ru", "st-im.kinopoisk.ru", "st-ok.cdn-vk.ru", "st.avito.ru",
+    "st.kinopoisk.ru", "st.max.ru", "st.okcdn.ru", "st.ozone.ru",
+    "staging-analytics.predict.mail.ru", "staging-esc.predict.mail.ru", "staging-sochi-park.predict.mail.ru",
+    "stand.aoc.mail.ru", "stand.bb.mail.ru", "stand.cb.mail.ru", "stand.la.mail.ru",
+    "stand.pw.mail.ru", "startrek.mail.ru", "static-mon.yandex.net", "static.dl.mail.ru",
+    "static.lemanapro.ru", "static.operator.mail.ru", "static.rutube.ru", "stats.avito.ru",
+    "stats.vk-portal.net", "status.mcs.mail.ru", "storage.ape.yandex.net", "storage0.sirius.online",
+    "stormriders.mail.ru", "stream.mail.ru", "street-combats.mail.ru", "strm-rad-23.strm.yandex.net",
+    "strm.yandex.net", "strm.yandex.ru", "styles.api.2gis.com", "suggest.dzen.ru",
+    "suggest.sso.dzen.ru", "sun1-13.userapi.com", "sun1-14.userapi.com", "sun1-15.userapi.com",
+    "sun1-16.userapi.com", "sun1-17.userapi.com", "sun1-18.userapi.com", "sun1-19.userapi.com",
+    "sun1-20.userapi.com", "sun1-21.userapi.com", "sun1-22.userapi.com", "sun1-23.userapi.com",
+    "sun1-24.userapi.com", "sun1-25.userapi.com", "sun1-26.userapi.com", "sun1-27.userapi.com",
+    "sun1-28.userapi.com", "sun1-29.userapi.com", "sun1-30.userapi.com", "sun1-47.userapi.com",
+    "sun1-54.userapi.com", "sun1-55.userapi.com", "sun1-56.userapi.com", "sun1-57.userapi.com",
+    "sun1-83.userapi.com", "sun1-84.userapi.com", "sun1-85.userapi.com", "sun1-86.userapi.com",
+    "sun1-87.userapi.com", "sun1-88.userapi.com", "sun1-89.userapi.com", "sun1-90.userapi.com",
+    "sun1-91.userapi.com", "sun1-92.userapi.com", "sun1-93.userapi.com", "sun1-94.userapi.com",
+    "sun1-95.userapi.com", "sun1-96.userapi.com", "sun1-97.userapi.com", "sun1-98.userapi.com",
+    "sun1-99.userapi.com", "sun2-10.userapi.com", "sun2-11.userapi.com", "sun2-12.userapi.com",
+    "sun2-13.userapi.com", "sun2-14.userapi.com", "sun2-15.userapi.com", "sun2-16.userapi.com",
+    "sun2-17.userapi.com", "sun2-18.userapi.com", "sun2-19.userapi.com", "sun2-20.userapi.com",
+    "sun2-21.userapi.com", "sun2-22.userapi.com", "sun3-10.userapi.com", "sun3-11.userapi.com",
+    "sun3-12.userapi.com", "sun3-13.userapi.com", "sun3-16.userapi.com", "sun3-17.userapi.com",
+    "sun3-18.userapi.com", "sun3-19.userapi.com", "sun3-20.userapi.com", "sun3-21.userapi.com",
+    "sun3-22.userapi.com", "sun3-23.userapi.com", "sun3-24.userapi.com", "sun4-10.userapi.com",
+    "sun4-11.userapi.com", "sun4-12.userapi.com", "sun4-15.userapi.com", "sun4-16.userapi.com",
+    "sun4-17.userapi.com", "sun4-18.userapi.com", "sun4-19.userapi.com", "sun4-20.userapi.com",
+    "sun4-21.userapi.com", "sun4-22.userapi.com", "sun6-20.userapi.com", "sun6-21.userapi.com",
+    "sun6-22.userapi.com", "sun6-23.userapi.com", "sun7-12.userapi.com", "sun7-13.userapi.com",
+    "sun7-14.userapi.com", "sun7-15.userapi.com", "sun7-16.userapi.com", "sun7-17.userapi.com",
+    "sun7-18.userapi.com", "sun7-19.userapi.com", "sun7-20.userapi.com", "sun7-21.userapi.com",
+    "sun7-22.userapi.com", "sun7-23.userapi.com", "sun7-24.userapi.com", "sun9-10.userapi.com",
+    "sun9-11.userapi.com", "sun9-12.userapi.com", "sun9-13.userapi.com", "sun9-14.userapi.com",
+    "sun9-15.userapi.com", "sun9-16.userapi.com", "sun9-17.userapi.com", "sun9-18.userapi.com",
+    "sun9-19.userapi.com", "sun9-20.userapi.com", "sun9-21.userapi.com", "sun9-22.userapi.com",
+    "sun9-23.userapi.com", "sun9-24.userapi.com", "sun9-25.userapi.com", "sun9-26.userapi.com",
+    "sun9-27.userapi.com", "sun9-28.userapi.com", "sun9-29.userapi.com", "sun9-30.userapi.com",
+    "sun9-31.userapi.com", "sun9-32.userapi.com", "sun9-33.userapi.com", "sun9-34.userapi.com",
+    "sun9-35.userapi.com", "sun9-36.userapi.com", "sun9-37.userapi.com", "sun9-38.userapi.com",
+    "sun9-39.userapi.com", "sun9-40.userapi.com", "sun9-41.userapi.com", "sun9-42.userapi.com",
+    "sun9-43.userapi.com", "sun9-44.userapi.com", "sun9-45.userapi.com", "sun9-46.userapi.com",
+    "sun9-47.userapi.com", "sun9-48.userapi.com", "sun9-49.userapi.com", "sun9-50.userapi.com",
+    "sun9-51.userapi.com", "sun9-52.userapi.com", "sun9-53.userapi.com", "sun9-54.userapi.com",
+    "sun9-55.userapi.com", "sun9-56.userapi.com", "sun9-57.userapi.com", "sun9-58.userapi.com",
+    "sun9-59.userapi.com", "sun9-60.userapi.com", "sun9-61.userapi.com", "sun9-62.userapi.com",
+    "sun9-63.userapi.com", "sun9-64.userapi.com", "sun9-65.userapi.com", "sun9-66.userapi.com",
+    "sun9-67.userapi.com", "sun9-68.userapi.com", "sun9-69.userapi.com", "sun9-70.userapi.com",
+    "sun9-71.userapi.com", "sun9-72.userapi.com", "sun9-73.userapi.com", "sun9-74.userapi.com",
+    "sun9-75.userapi.com", "sun9-76.userapi.com", "sun9-77.userapi.com", "sun9-78.userapi.com",
+    "sun9-79.userapi.com", "sun9-80.userapi.com", "sun9-81.userapi.com", "sun9-82.userapi.com",
+    "sun9-83.userapi.com", "sun9-84.userapi.com", "sun9-85.userapi.com", "sun9-86.userapi.com",
+    "sun9-87.userapi.com", "sun9-88.userapi.com", "support.biz.mail.ru", "support.mcs.mail.ru",
+    "support.tech.mail.ru", "surveys.yandex.ru", "sync.browser.yandex.net", "tamtam.ok.ru",
+    "target.vk.ru", "team.mail.ru", "team.rzd.ru", "tech.mail.ru",
+    "tech.vk.ru", "tera.mail.ru", "ticket.rzd.ru", "tickets.widget.kinopoisk.ru",
+    "tidaltrek.mail.ru", "tile0.maps.2gis.com", "tile1.maps.2gis.com", "tile2.maps.2gis.com",
+    "tile3.maps.2gis.com", "tile4.maps.2gis.com", "tiles.maps.mail.ru", "tmgame.mail.ru",
+    "todo.mail.ru", "top-fwz1.mail.ru", "touch.kinopoisk.ru", "townwars.mail.ru",
+    "travel.rzd.ru", "travel.yandex.ru", "travel.yastatic.net", "trk.mail.ru",
+    "ttbh.mail.ru", "tutu.ru", "tv.mail.ru", "typewriter.mail.ru",
+    "u.corp.mail.ru", "ufo.mail.ru", "ui.cs7777.vk.ru", "ui.tau.vk.ru",
+    "user-geo-data.wildberries.ru", "uslugi.yandex.ru", "uxfeedback-cdn.s3.yandex.net", "uxfeedback.yandex.ru",
+    "vk-portal.net", "vk.mail.ru", "vkdoc.mail.ru", "vkvideo.cs7777.vk.ru",
+    "voina.mail.ru", "volunteer.lizaalert.org", "voter.gosuslugi.ru", "vt-1.ozone.ru",
+    "wap.yandex.com", "wap.yandex.ru", "warface.mail.ru", "warheaven.mail.ru",
+    "wartune.mail.ru", "wb.ru", "web.max.ru", "webagent.mail.ru",
+    "weblink.predict.mail.ru", "webstore.mail.ru", "welcome.mail.ru", "welcome.rzd.ru",
+    "wf.mail.ru", "wh-cpg.money.mail.ru", "whatsnew.mail.ru", "widgets.kinopoisk.ru",
+    "wok.mail.ru", "wos.mail.ru", "ws-api.oneme.ru", "ws.seller.ozon.ru",
+    "www.avito.ru", "www.avito.st", "www.biz.mail.ru", "www.cikrf.ru",
+    "www.gosuslugi.ru", "www.kinopoisk.ru", "www.mail.ru", "www.mcs.mail.ru",
+    "www.ozon.ru", "www.pubg.mail.ru", "www.rzd.ru", "www.sberbank.ru",
+    "www.t2.ru", "www.vtb.ru", "www.wf.mail.ru", "xapi.ozon.ru",
+    "xn--80ajghhoc2aj1c8b.xn--p1ai", "ya.ru", "yabro-wbplugin.edadeal.yandex.ru",
+    "yabs.yandex.ru", "yandex.com", "yandex.net", "yandex.ru",
+    "yastatic.net", "zen-yabro-morda.mediascope.mc.yandex.ru", "zen.yandex.com", "zen.yandex.net", "zen.yandex.ru"
+])
+
+BLOCKED_SNI_LIST = [
+    'instagram', 'facebook', 'twitter', 'bbc',
+    'meduza', 'svoboda', 'linkedin', 'torproject'
+]
+
+CARRIER_PROFILES = {
+    "MTS": [
+        {"api_id": 2040, "api_hash": "b18441a1ff607e10a989891a5462e627", "ua": "Mozilla/5.0 (Linux; Android 15; SM-S938B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36", "impersonate": "chrome120", "model": "SM-S938B", "sys_ver": "15", "app_ver": "11.6.0", "device": "Samsung Galaxy S25 Ultra"},
+        {"api_id": 21724, "api_hash": "3e0cb5efcd52300aec5994fdfc5bdc16", "ua": "Mozilla/5.0 (Linux; Android 14; SM-A546B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36", "impersonate": "chrome120", "model": "SM-A546B", "sys_ver": "14", "app_ver": "11.6.0", "device": "Samsung Galaxy A54"},
+        {"api_id": 17349, "api_hash": "344583e45741c457fe1862106095a5eb", "ua": "Mozilla/5.0 (Linux; Android 15; 2407FPN8EC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36", "impersonate": "chrome120", "model": "2407FPN8EC", "sys_ver": "15", "app_ver": "11.6.0", "device": "Xiaomi 14 Ultra"},
+    ],
+    "Beeline": [
+        {"api_id": 2040, "api_hash": "b18441a1ff607e10a989891a5462e627", "ua": "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36", "impersonate": "chrome120", "model": "Pixel 9 Pro", "sys_ver": "15", "app_ver": "11.6.0", "device": "Pixel 9 Pro"},
+        {"api_id": 10840, "api_hash": "33c45224029d59cb3ad0c16571f8f1ec", "ua": "Mozilla/5.0 (Linux; Android 14; 2311DRK48C) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36", "impersonate": "chrome120", "model": "2311DRK48C", "sys_ver": "14", "app_ver": "11.6.0", "device": "Xiaomi 13T Pro"},
+    ],
+    "Megafon": [
+        {"api_id": 2040, "api_hash": "b18441a1ff607e10a989891a5462e627", "ua": "Mozilla/5.0 (Linux; Android 15; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36", "impersonate": "chrome120", "model": "Pixel 8 Pro", "sys_ver": "15", "app_ver": "11.6.0", "device": "Pixel 8 Pro"},
+        {"api_id": 10534, "api_hash": "fe34206a33b7c83857c86d67c0dc4502", "ua": "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36", "impersonate": "chrome120", "model": "SM-S928B", "sys_ver": "14", "app_ver": "11.6.0", "device": "Samsung Galaxy S24+"},
+    ],
+    "Tele2": [
+        {"api_id": 2040, "api_hash": "b18441a1ff607e10a989891a5462e627", "ua": "Mozilla/5.0 (Linux; Android 14; RMX3701) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36", "impersonate": "chrome120", "model": "RMX3701", "sys_ver": "14", "app_ver": "11.6.0", "device": "Realme GT 7 Pro"},
+        {"api_id": 17349, "api_hash": "344583e45741c457fe1862106095a5eb", "ua": "Mozilla/5.0 (Linux; Android 15; SM-A356B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36", "impersonate": "chrome120", "model": "SM-A356B", "sys_ver": "15", "app_ver": "11.6.0", "device": "Samsung Galaxy A35"},
+    ]
+}
+
+_CURRENT_OS = platform.system()
+if _CURRENT_OS == "Windows":
+    CURRENT_TG_USER_AGENT = "Telegram-Desktop/5.10.2 (Windows 11; x64)"
+elif _CURRENT_OS == "Darwin":
+    CURRENT_TG_USER_AGENT = "Telegram-macOS/10.14 (MacBookPro; macOS 15.2)"
+elif _CURRENT_OS == "Linux":
+    CURRENT_TG_USER_AGENT = "Telegram-Desktop/5.10.2 (Linux; x86_64)"
+else:
+    CURRENT_TG_USER_AGENT = "Telegram-Android/11.6.0 (Android 15; SM-S938B; arm64-v8a)"
+
+RU_WHITELIST_CIDR = [
+    "87.250.224.0/19", "93.158.128.0/18", "95.213.0.0/16", "109.207.0.0/20",
+    "185.12.92.0/22", "5.45.192.0/18", "2a02:6b8::/32", "188.93.16.0/21",
+    "212.45.0.0/19", "185.32.248.0/22", "194.67.32.0/21", "195.34.52.0/22",
+    "91.206.200.0/23", "80.81.1.0/24", "89.108.64.0/19", "90.156.160.0/19",
+    "45.136.20.0/22", "45.136.24.0/22", "45.94.8.0/22", "45.140.16.0/22",
+    "45.144.4.0/22", "45.150.28.0/22", "45.153.4.0/22", "45.155.8.0/22",
+    "77.220.128.0/19", "77.244.0.0/20", "79.137.0.0/19", "79.174.16.0/21",
+    "82.146.32.0/19", "83.217.8.0/21", "84.252.128.0/18", "85.142.0.0/15",
+    "91.105.128.0/20", "91.146.0.0/18", "92.53.0.0/18", "92.255.64.0/18",
+    "94.26.0.0/18", "94.228.112.0/20", "94.230.128.0/20", "95.163.0.0/17",
+    "95.181.0.0/18", "95.183.0.0/18", "109.68.0.0/19", "109.126.0.0/18",
+    "109.197.64.0/21", "109.238.0.0/19", "141.105.64.0/21", "146.158.0.0/17",
+    "151.236.0.0/18", "158.46.128.0/19", "159.255.32.0/19", "171.25.128.0/19",
+    "176.9.0.0/19", "176.32.64.0/19", "176.57.64.0/19", "176.99.0.0/19",
+    "176.111.48.0/21", "176.112.0.0/19", "176.118.0.0/19", "178.18.16.0/20",
+    "178.34.0.0/18", "178.57.64.0/18", "178.132.128.0/18", "178.167.0.0/17",
+    "178.219.0.0/18", "185.3.32.0/22", "185.4.128.0/22", "185.5.0.0/19",
+    "185.10.60.0/22", "185.14.68.0/22", "185.18.12.0/22", "185.22.60.0/22",
+    "185.26.4.0/22", "185.30.16.0/22", "185.30.124.0/22", "185.32.8.0/22",
+    "185.32.12.0/22", "185.35.8.0/22", "185.37.28.0/22", "185.41.124.0/22",
+    "185.42.44.0/22", "185.43.12.0/22", "185.44.12.0/22", "185.44.68.0/22",
+    "185.45.0.0/22", "185.45.152.0/22", "185.46.120.0/22", "185.48.12.0/22",
+    "185.48.164.0/22", "185.50.24.0/22", "185.52.108.0/22", "185.55.220.0/22",
+    "185.58.36.0/22", "185.60.132.0/22", "185.61.40.0/22", "185.65.12.0/22",
+    "185.67.16.0/22", "185.69.0.0/22", "185.71.0.0/22", "185.73.76.0/22",
+    "185.74.0.0/22", "185.77.0.0/22", "185.79.24.0/22", "185.82.0.0/22",
+    "185.84.8.0/22", "185.86.0.0/22", "185.87.40.0/22", "185.88.0.0/22",
+    "185.92.72.0/22", "185.93.4.0/22", "185.94.32.0/22", "185.96.116.0/22",
+    "185.97.0.0/22", "185.98.0.0/22", "185.101.0.0/22", "185.103.0.0/22",
+    "185.104.112.0/22", "185.105.72.0/22", "185.106.28.0/22", "185.107.44.0/22",
+    "185.107.124.0/22", "185.109.128.0/22", "185.110.0.0/22", "185.111.16.0/22",
+    "185.114.128.0/22", "185.115.0.0/22", "185.117.24.0/22", "185.118.0.0/22",
+    "185.118.36.0/22", "185.119.28.0/22", "185.120.16.0/22", "185.121.0.0/22",
+    "185.124.0.0/22", "185.126.48.0/22", "185.127.0.0/22", "185.128.0.0/22",
+    "185.129.0.0/22", "185.130.0.0/22", "185.131.0.0/22", "185.132.0.0/22",
+    "185.133.0.0/22", "185.134.0.0/22", "185.135.0.0/22", "185.136.0.0/22",
+    "185.137.0.0/22", "185.138.0.0/22", "185.139.0.0/22", "185.140.0.0/22",
+    "185.141.0.0/22", "185.142.0.0/22", "185.143.0.0/22", "185.144.0.0/22",
+    "185.145.0.0/22", "185.146.0.0/22", "185.147.0.0/22", "185.148.0.0/22",
+    "185.149.0.0/22", "185.150.0.0/22", "185.151.0.0/22", "185.152.0.0/22",
+    "185.153.0.0/22", "185.154.0.0/22", "185.155.0.0/22", "185.156.0.0/22",
+    "185.157.0.0/22", "185.158.0.0/22", "185.159.0.0/22", "185.160.0.0/22",
+    "185.161.0.0/22", "185.162.0.0/22", "185.163.0.0/22", "185.164.0.0/22",
+    "185.165.0.0/22", "185.166.0.0/22", "185.167.0.0/22", "185.168.0.0/22",
+    "185.169.0.0/22", "185.170.0.0/22", "185.171.0.0/22", "185.172.0.0/22",
+    "185.173.0.0/22", "185.174.0.0/22", "185.175.0.0/22", "185.176.0.0/22",
+    "185.177.0.0/22", "185.178.0.0/22", "185.179.0.0/22", "185.180.0.0/22",
+    "185.181.0.0/22", "185.182.0.0/22", "185.183.0.0/22", "185.184.0.0/22",
+    "185.185.0.0/22", "185.186.0.0/22", "185.187.0.0/22", "185.188.0.0/22",
+    "185.189.0.0/22", "185.190.0.0/22", "185.191.0.0/22", "185.192.0.0/22",
+    "185.193.0.0/22", "185.194.0.0/22", "185.195.0.0/22", "185.196.0.0/22",
+    "185.197.0.0/22", "185.198.0.0/22", "185.199.0.0/22", "185.200.0.0/22",
+    "185.201.0.0/22", "185.202.0.0/22", "185.203.0.0/22", "185.204.0.0/22",
+    "185.205.0.0/22", "185.206.0.0/22", "185.207.0.0/22", "185.208.0.0/22",
+    "185.209.0.0/22", "185.210.0.0/22", "185.211.0.0/22", "185.212.0.0/22",
+    "185.213.0.0/22", "185.214.0.0/22", "185.215.0.0/22", "185.216.0.0/22",
+    "185.217.0.0/22", "185.218.0.0/22", "185.219.0.0/22", "185.220.0.0/22",
+    "185.221.0.0/22", "185.222.0.0/22", "185.223.0.0/22", "185.224.0.0/22",
+    "185.225.0.0/22", "185.226.0.0/22", "185.227.0.0/22", "185.228.0.0/22",
+    "185.229.0.0/22", "185.230.0.0/22", "185.231.0.0/22", "185.232.0.0/22",
+    "185.233.0.0/22", "185.234.0.0/22", "185.235.0.0/22", "185.236.0.0/22",
+    "185.237.0.0/22", "185.238.0.0/22", "185.239.0.0/22", "185.240.0.0/22",
+    "185.241.0.0/22", "185.242.0.0/22", "185.243.0.0/22", "185.244.0.0/22",
+    "185.245.0.0/22", "185.246.0.0/22", "185.247.0.0/22", "185.248.0.0/22",
+    "185.249.0.0/22", "185.250.0.0/22", "185.251.0.0/22", "185.252.0.0/22",
+    "185.253.0.0/22", "185.254.0.0/22", "185.255.0.0/22", "188.92.16.0/21",
+    "188.124.32.0/19", "188.130.128.0/19", "188.132.0.0/19", "188.227.16.0/21",
+    "193.9.28.0/22", "193.16.42.0/24", "193.19.88.0/23", "193.27.64.0/22",
+    "193.32.40.0/22", "193.33.68.0/23", "193.33.168.0/23", "193.34.8.0/22",
+    "193.34.140.0/22", "193.39.112.0/22", "193.46.64.0/22", "193.58.0.0/22",
+    "193.106.88.0/22", "193.108.32.0/23", "193.108.128.0/22", "193.109.48.0/22",
+    "193.110.8.0/22", "193.124.0.0/16", "193.138.36.0/22", "193.142.152.0/22",
+    "193.150.0.0/18", "193.164.16.0/22", "193.164.64.0/22", "193.178.168.0/21",
+    "193.188.128.0/19", "193.193.0.0/19", "193.200.24.0/21", "193.203.8.0/22",
+    "193.203.60.0/22", "193.218.0.0/19", "193.222.88.0/22", "193.232.0.0/16",
+    "194.1.164.0/22", "194.8.64.0/22", "194.15.112.0/22", "194.247.0.0/19",
+    "194.50.80.0/22", "194.54.80.0/22", "194.58.64.0/19", "194.85.0.0/18",
+    "194.88.0.0/19", "194.110.64.0/22", "194.116.128.0/19", "194.135.0.0/19",
+    "194.146.0.0/22", "194.149.64.0/19", "194.150.64.0/22", "194.156.64.0/22",
+    "194.165.16.0/22", "194.169.32.0/19", "194.186.0.0/16", "194.190.0.0/16",
+    "194.213.16.0/22", "194.226.0.0/16", "195.2.192.0/19", "195.3.136.0/22",
+    "195.5.64.0/19", "195.7.0.0/19", "195.8.40.0/21", "195.8.128.0/19",
+    "195.10.192.0/19", "195.12.32.0/19", "195.16.64.0/19", "195.20.128.0/19",
+    "195.22.128.0/19", "195.26.0.0/19", "195.28.32.0/19", "195.34.0.0/16",
+    "195.42.128.0/19", "195.43.64.0/19", "195.46.128.0/19", "195.47.128.0/17",
+    "195.54.0.0/19", "195.58.0.0/19", "195.64.192.0/19", "195.66.64.0/19",
+    "195.68.128.0/19", "195.69.128.0/22", "195.70.192.0/19", "195.74.64.0/19",
+    "195.78.32.0/19", "195.80.128.0/19", "195.82.128.0/19", "195.88.0.0/19",
+    "195.91.128.0/17", "195.93.140.0/22", "195.94.224.0/19", "195.96.64.0/19",
+    "195.110.32.0/19", "195.112.224.0/19", "195.116.0.0/15", "195.128.64.0/19",
+    "195.128.128.0/19", "195.130.128.0/19", "195.133.0.0/16", "195.135.0.0/16",
+    "195.144.16.0/22", "195.146.64.0/19", "195.149.96.0/22", "195.160.128.0/19",
+    "195.161.0.0/16", "195.162.32.0/19", "195.170.192.0/19", "195.177.192.0/19",
+    "195.178.192.0/19", "195.182.0.0/19", "195.182.128.0/19", "195.184.64.0/19",
+    "195.189.64.0/22", "195.189.192.0/22", "195.190.96.0/19", "195.191.64.0/23",
+    "195.191.128.0/19", "195.200.64.0/19", "195.200.192.0/19", "195.206.32.0/19",
+    "195.208.0.0/16", "195.209.0.0/16", "195.210.128.0/19", "195.211.20.0/22",
+    "195.218.128.0/19", "195.222.128.0/19", "195.225.32.0/19", "195.226.192.0/19",
+    "195.234.32.0/19", "195.238.0.0/19", "195.239.0.0/16", "195.242.128.0/19",
+    "195.244.0.0/19", "195.245.64.0/19", "195.246.128.0/19", "195.248.64.0/19",
+    "212.1.224.0/19", "212.5.64.0/19", "212.8.192.0/19", "212.11.128.0/19",
+    "212.12.0.0/19", "212.13.0.0/19", "212.14.160.0/19", "212.15.96.0/19",
+    "212.16.0.0/19", "212.19.0.0/19", "212.20.0.0/19", "212.22.64.0/19",
+    "212.24.32.0/19", "212.26.224.0/19", "212.30.128.0/19", "212.33.64.0/19",
+    "212.33.192.0/19", "212.34.32.0/19", "212.35.160.0/19", "212.37.128.0/19",
+    "212.40.0.0/19", "212.41.0.0/19", "212.42.32.0/19", "212.44.128.0/19",
+    "212.45.0.0/19", "212.46.0.0/19", "212.47.0.0/19", "212.48.32.0/19",
+    "212.48.128.0/19", "212.49.96.0/19", "212.53.32.0/19", "212.54.0.0/19",
+    "212.57.96.0/19", "212.58.192.0/19", "212.59.0.0/19", "212.60.0.0/19",
+    "212.65.64.0/19", "212.66.32.0/19", "212.69.96.0/19", "212.74.192.0/19",
+    "212.83.0.0/19", "212.90.128.0/19", "212.92.128.0/19", "212.94.192.0/19",
+    "212.100.128.0/19", "212.107.192.0/19", "212.109.0.0/19", "212.111.192.0/19",
+    "212.113.0.0/19", "212.116.96.0/19", "212.119.160.0/19", "212.122.0.0/19",
+    "212.129.0.0/18", "212.151.0.0/16", "212.158.160.0/19", "212.164.0.0/16",
+    "212.176.0.0/16", "212.192.0.0/16", "212.193.0.0/16", "213.5.0.0/21",
+    "213.16.0.0/19", "213.21.0.0/19", "213.24.0.0/19", "213.25.0.0/16",
+    "213.27.0.0/19", "213.29.0.0/16", "213.33.0.0/19", "213.34.0.0/19",
+    "213.37.0.0/16", "213.39.0.0/16", "213.40.0.0/16", "213.45.0.0/16",
+    "213.47.0.0/16", "213.48.0.0/19", "213.49.0.0/16", "213.53.0.0/16",
+    "213.59.0.0/16", "213.66.0.0/16", "213.79.0.0/19", "213.80.0.0/19",
+    "213.85.0.0/16", "213.87.0.0/16", "213.88.0.0/16", "213.90.0.0/16",
+    "213.92.0.0/19", "213.95.0.0/18", "213.108.0.0/19", "213.110.128.0/19",
+    "213.128.0.0/19", "213.129.32.0/19", "213.130.0.0/19", "213.132.64.0/19",
+    "213.135.64.0/19", "213.137.224.0/19", "213.138.96.0/19", "213.140.96.0/19",
+    "213.141.192.0/19", "213.142.160.0/19", "213.147.32.0/19", "213.148.160.0/19",
+    "213.150.64.0/19", "213.151.0.0/19", "213.152.128.0/19", "213.155.128.0/19",
+    "213.156.192.0/19", "213.157.0.0/19", "213.158.0.0/19", "213.159.0.0/19",
+    "213.160.128.0/19", "213.167.0.0/19", "213.168.32.0/19", "213.170.64.0/19",
+    "213.171.0.0/19", "213.172.0.0/19", "213.173.0.0/19", "213.174.0.0/19",
+    "213.175.0.0/19", "213.176.0.0/19", "213.177.0.0/19", "213.178.0.0/19",
+    "213.179.0.0/19", "213.180.0.0/19", "213.181.0.0/19", "213.182.0.0/19",
+    "213.183.0.0/19", "213.184.0.0/19", "213.185.0.0/19", "213.186.0.0/19",
+    "213.187.0.0/19", "213.188.0.0/19", "213.189.0.0/19", "213.190.0.0/19",
+    "213.191.0.0/19", "213.192.0.0/19", "213.193.0.0/19", "213.194.0.0/19",
+    "213.195.0.0/19", "213.196.0.0/19", "213.197.0.0/19", "213.198.0.0/19",
+    "213.199.0.0/19", "213.200.0.0/19", "213.201.0.0/19", "213.202.0.0/19",
+    "213.203.0.0/19", "213.204.0.0/19", "213.205.0.0/19", "213.206.0.0/19",
+    "213.207.0.0/19", "213.208.0.0/19", "213.209.0.0/19", "213.210.0.0/19",
+    "213.211.0.0/19", "213.212.0.0/19", "213.213.0.0/19", "213.214.0.0/19",
+    "213.215.0.0/19", "213.216.0.0/19", "213.217.0.0/19", "213.218.0.0/19",
+    "213.219.0.0/19", "213.220.0.0/19", "213.221.0.0/19", "213.222.0.0/19",
+    "213.223.0.0/19", "213.224.0.0/19", "213.225.0.0/19", "213.226.0.0/19",
+    "213.227.0.0/19", "213.228.0.0/19", "213.229.0.0/19", "213.230.0.0/19",
+    "213.231.0.0/19", "213.232.0.0/19", "213.233.0.0/19", "213.234.0.0/19",
+    "213.235.0.0/19", "213.236.0.0/19", "213.237.0.0/19", "213.238.0.0/19",
+    "213.239.0.0/19", "213.240.0.0/19", "213.241.0.0/19", "213.242.0.0/19",
+    "213.243.0.0/19", "213.244.0.0/19", "213.245.0.0/19", "213.246.0.0/19",
+    "213.247.0.0/19", "213.248.0.0/19", "213.249.0.0/19", "213.250.0.0/19",
+    "213.251.0.0/19", "213.252.0.0/19", "213.253.0.0/19", "213.254.0.0/19",
+    "213.255.0.0/19", "217.8.224.0/20", "217.9.0.0/20", "217.10.32.0/20",
+    "217.11.176.0/20", "217.12.96.0/20", "217.12.240.0/20", "217.13.160.0/20",
+    "217.14.16.0/20", "217.15.128.0/20", "217.16.16.0/20", "217.17.0.0/20",
+    "217.18.128.0/20", "217.19.112.0/20", "217.20.64.0/20", "217.21.96.0/20",
+    "217.22.160.0/20", "217.23.0.0/20", "217.23.176.0/20", "217.24.112.0/20",
+    "217.24.144.0/20", "217.25.80.0/20", "217.25.144.0/20", "217.26.0.0/20",
+    "217.26.160.0/20", "217.28.64.0/20", "217.29.48.0/20", "217.30.160.0/20",
+    "217.31.0.0/20", "217.31.240.0/20", "217.64.16.0/20", "217.65.0.0/20",
+    "217.65.192.0/20", "217.66.16.0/20", "217.66.144.0/20", "217.67.0.0/20",
+    "217.67.176.0/20", "217.68.16.0/20", "217.68.240.0/20", "217.70.16.0/20",
+    "217.70.112.0/20", "217.70.240.0/20", "217.71.128.0/20", "217.72.0.0/20",
+    "217.72.144.0/20", "217.73.16.0/20", "217.73.192.0/20", "217.74.16.0/20",
+    "217.74.240.0/20", "217.75.32.0/20", "217.75.192.0/20", "217.76.176.0/20",
+    "217.77.96.0/20", "217.78.112.0/20", "217.79.0.0/20", "217.79.16.0/20",
+    "217.79.48.0/20", "217.80.0.0/14", "217.112.0.0/20", "217.112.32.0/20",
+    "217.113.16.0/20", "217.113.112.0/20", "217.114.0.0/20", "217.114.176.0/20",
+    "217.115.16.0/20", "217.115.80.0/20", "217.116.0.0/20", "217.116.128.0/20",
+    "217.117.112.0/20", "217.118.48.0/20", "217.118.64.0/20", "217.118.192.0/20",
+    "217.119.16.0/20", "217.119.152.0/20", "217.144.96.0/20", "217.145.16.0/20",
+    "217.145.144.0/20", "217.146.0.0/20", "217.146.192.0/20", "217.147.0.0/20",
+    "217.147.32.0/20", "217.148.128.0/20", "217.149.16.0/20", "217.149.128.0/20",
+    "217.150.0.0/20", "217.150.32.0/20", "217.151.16.0/20", "217.151.128.0/20",
+    "217.152.128.0/18", "217.154.0.0/20", "217.157.0.0/16", "217.163.16.0/20",
+    "217.168.64.0/20", "217.168.240.0/20", "217.169.80.0/20", "217.170.64.0/20",
+    "217.170.208.0/20", "217.171.16.0/20", "217.171.128.0/20", "217.172.16.0/20",
+    "217.174.0.0/20", "217.175.16.0/20", "217.175.128.0/20", "217.176.0.0/20",
+    "217.177.0.0/20", "217.178.0.0/20", "217.179.0.0/20", "217.180.0.0/20",
+    "217.181.0.0/20", "217.182.0.0/20", "217.183.0.0/20", "217.184.0.0/20",
+    "217.185.0.0/20", "217.186.0.0/20", "217.187.0.0/20", "217.188.0.0/20",
+    "217.189.0.0/20", "217.190.0.0/20", "217.191.0.0/20", "217.192.0.0/20",
+    "217.193.0.0/20", "217.194.0.0/20", "217.195.0.0/20", "217.196.0.0/20",
+    "217.197.0.0/20", "217.198.0.0/20", "217.199.0.0/20", "217.200.0.0/20",
+    "217.201.0.0/20", "217.202.0.0/20", "217.203.0.0/20", "217.204.0.0/20",
+    "217.205.0.0/20", "217.206.0.0/20", "217.207.0.0/20", "217.208.0.0/20",
+    "217.209.0.0/20", "217.210.0.0/20", "217.211.0.0/20", "217.212.0.0/20",
+    "217.213.0.0/20", "217.214.0.0/20", "217.215.0.0/20", "217.216.0.0/20",
+    "217.217.0.0/20", "217.218.0.0/20", "217.219.0.0/20", "217.220.0.0/20",
+    "217.221.0.0/20", "217.222.0.0/20", "217.223.0.0/20", "217.224.0.0/20",
+    "217.225.0.0/20", "217.226.0.0/20", "217.227.0.0/20", "217.228.0.0/20",
+    "217.229.0.0/20", "217.230.0.0/20", "217.231.0.0/20", "217.232.0.0/20",
+    "217.233.0.0/20", "217.234.0.0/20", "217.235.0.0/20", "217.236.0.0/20",
+    "217.237.0.0/20", "217.238.0.0/20", "217.239.0.0/20"
+]
+
+RU_TRUSTED_ASNS = [13238, 47764, 25159, 39958, 43531, 203857, 60603, 205256, 197695, 48094]
+
+def _try_aes_ctr(data: bytes, key: bytes, iv: bytes) -> Optional[bytes]:
+    padded_key = (key + b'\x00' * 32)[:32]
+    padded_iv = (iv + b'\x00' * 16)[:16]
+    if HAS_PYCRYPTODOME:
+        try:
+            c = _AES.new(padded_key, _AES.MODE_CTR, initial_value=padded_iv, nonce=b'')
+            return c.encrypt(data)
+        except Exception:
+            pass
+    if HAS_CRYPTOGRAPHY:
+        try:
+            enc = _Cipher(_alg.AES(padded_key), _modes.CTR(padded_iv)).encryptor()
+            return enc.update(data) + enc.finalize()
+        except Exception:
+            pass
+    return None
+
+def _install_asyncio_exception_handler(loop):
+    def _handler(loop_ref, context):
+        exc = context.get('exception')
+        if exc is None: return
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError)): return
+        if isinstance(exc, OSError) and getattr(exc, 'winerror', None) in (10054, 10053, 64, 232): return
+        try:
+            loop_ref.default_exception_handler(context)
+        except Exception:
+            pass
+    try:
+        loop.set_exception_handler(_handler)
+    except Exception:
+        pass
+
+async def _safe_disconnect(client):
+    if client is None: return
+    try:
+        if client.is_connected():
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=3.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+    except Exception:
+        pass
+    try:
+        session = getattr(client, 'session', None)
+        if session is not None and hasattr(session, 'close'):
+            try:
+                await session.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _valid_port(port_str: str) -> bool:
+    try:
+        return 1 <= int(port_str) <= 65535
+    except (ValueError, TypeError):
+        return False
+
+def _decode_domain(secret: str) -> Optional[str]:
+    if not secret.startswith('ee') or len(secret) <= 34:
+        return None
+    domain_hex = secret[34:]
+    if len(domain_hex) % 2 != 0:
+        return None
+    try:
+        raw = bytes.fromhex(domain_hex)
+        text = raw.decode('ascii', errors='ignore').rstrip('\x00').strip()
+        return text.lower() if text else None
+    except Exception:
+        return None
+
+def _is_blocked(secret: str, domain: Optional[str]) -> bool:
+    if len(secret) < 32: return True
+    if domain and any(b in domain for b in BLOCKED_SNI_LIST): return True
+    return False
+
+class ChromeFingerprintFakeTLSConnection(ConnectionTcpMTProxyRandomizedIntermediate):
+    async def send(self, data: bytes):
+        if not hasattr(self, '_tls_handshake_sent'):
+            selected_domain = random.choice(BS_COMPAT_SNI_RU)
+            sni_payload = selected_domain.encode('utf-8')
+            sni_length = len(sni_payload)
+            client_hello_buffer = bytearray([0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc, 0x03, 0x03])
+            client_hello_buffer.extend(os.urandom(32))
+            client_hello_buffer.extend([
+                0x20, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee,
+                0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee,
+                0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee,
+                0x00, 0x06, 0x13, 0x01, 0x13, 0x02, 0x13, 0x03, 0x01, 0x00, 0x01, 0x91
+            ])
+            sni_extension = bytearray([
+                0x00, 0x00, (sni_length + 5) >> 8, (sni_length + 5) & 0xFF,
+                (sni_length + 3) >> 8, (sni_length + 3) & 0xFF,
+                0x00, sni_length >> 8, sni_length & 0xFF
+            ])
+            sni_extension.extend(sni_payload)
+            client_hello_buffer.extend(sni_extension)
+            client_hello_buffer.extend([0x00, 0x0a, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1d])
+            if hasattr(self, '_writer') and self._writer:
+                self._writer.write(bytes(client_hello_buffer))
+            self._tls_handshake_sent = True
+        await super().send(data)
+
+class DNSCache:
+    def __init__(self):
+        self.cache = {}
+        self.timestamps = {}
+        self.lock = threading.Lock()
+
+    def get(self, hostname):
+        with self.lock:
+            if hostname in self.cache:
+                if time.time() - self.timestamps[hostname] < DNS_CACHE_TTL:
+                    return self.cache[hostname]
+                else:
+                    del self.cache[hostname]
+                    del self.timestamps[hostname]
+        return None
+
+    def set(self, hostname, ip):
+        with self.lock:
+            self.cache[hostname] = ip
+            self.timestamps[hostname] = time.time()
+
+class GeoCache:
+    def __init__(self):
+        self.cache = {}
+        self.lock = threading.Lock()
+
+    def get(self, ip):
+        with self.lock:
+            return self.cache.get(ip)
+
+    def set(self, ip, data):
+        with self.lock:
+            self.cache[ip] = data
+
+class RateLimiter:
+    def __init__(self, max_calls=40, period=60.0):
+        self.max_calls = max_calls
+        self.period = period
+        self.calls = []
+        self.lock = threading.Lock()
+
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            self.calls = [t for t in self.calls if now - t <= self.period]
+            if len(self.calls) >= self.max_calls:
+                sleep_time = self.period - (now - self.calls[0]) + 0.1
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                now = time.monotonic()
+                self.calls = [t for t in self.calls if now - t <= self.period]
+            self.calls.append(now)
+
+class MTProtoChecker:
+    _dns_cache = DNSCache()
+    _geo_cache = GeoCache()
+    _last_geo_request = 0.0
+    _geo_lock = threading.Lock()
+    _session = None
+    _session_lock = threading.Lock()
+    _asn_cache = DNSCache()
+    _rate_limiter = RateLimiter(max_calls=35, period=60.0)
+
+    GITHUB_PROXY_SOURCES = [
+        "https://raw.githubusercontent.com/SoliSpirit/mtproto/main/all_proxies.txt",
+        "https://raw.githubusercontent.com/Grim1313/mtproto-for-telegram/main/all_proxies.txt",
+        "https://raw.githubusercontent.com/ALIILAPRO/MTProtoProxy/main/mtproto.txt",
+        "https://raw.githubusercontent.com/Argh94/Proxy-List/main/MTProto.txt"
+    ]
+
+    @staticmethod
+    def _get_session():
+        if MTProtoChecker._session is None:
+            with MTProtoChecker._session_lock:
+                if MTProtoChecker._session is None:
+                    s = requests.Session()
+                    s.headers.update({'User-Agent': CURRENT_TG_USER_AGENT})
+                    MTProtoChecker._session = s
+        return MTProtoChecker._session
+    
+    @staticmethod
+    def _smart_sni_check(sni):
+        if not sni: return False
+        sni_lower = sni.lower()
+        for pattern in GOVERNMENT_SNI_PATTERNS:
+            if '{region}' in pattern and '{i}' in pattern:
+                regex_pattern = pattern.replace('{region}', '[a-zA-Z0-9-]+').replace('{i}', '[0-9]+')
+                if re.search(regex_pattern, sni_lower): return True
+            elif '{region}' in pattern:
+                regex_pattern = pattern.replace('{region}', '[a-zA-Z0-9-]+')
+                if re.search(regex_pattern, sni_lower): return True
+        return False
+
+    @staticmethod
+    def extract_proxies_from_text(text: str) -> List[str]:
+        proxies_set = set()
+        tg_pattern = re.compile(r'tg://proxy\?server=([^\s&]+)&port=(\d+)&secret=([A-Za-z0-9_=+/%-]+)', re.IGNORECASE)
+        for h, p, s in tg_pattern.findall(text):
+            if _valid_port(p):
+                proxies_set.add(f"tg://proxy?server={h}&port={p}&secret={s}")
+        tme_pattern = re.compile(r't\.me/proxy\?server=([^\s&]+)&port=(\d+)&secret=([A-Za-z0-9_=+/%-]+)', re.IGNORECASE)
+        for h, p, s in tme_pattern.findall(text):
+            if _valid_port(p):
+                proxies_set.add(f"https://t.me/proxy?server={h}&port={p}&secret={s}")
+        socks_pattern = re.compile(r'tg://socks\?server=([^\s&]+)&port=(\d+)(?:&user=([^\s&]+))?(?:&pass=([^\s&]+))?', re.IGNORECASE)
+        for h, p, u, pw in socks_pattern.findall(text):
+            if _valid_port(p):
+                link = f"tg://socks?server={h}&port={p}"
+                if u: link += f"&user={u}"
+                if pw: link += f"&pass={pw}"
+                proxies_set.add(link)
+        simple_pattern = re.compile(r'([A-Za-z0-9\.-]+):(\d+):([A-Fa-f0-9]{32,})')
+        for h, p, s in simple_pattern.findall(text):
+            if _valid_port(p):
+                proxies_set.add(f"tg://proxy?server={h}&port={p}&secret={s}")
+        txt = text.strip()
+        if txt.startswith('[') or txt.startswith('{'):
+            try:
+                data = json.loads(txt)
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            host = item.get('host') or item.get('server')
+                            port = item.get('port')
+                            secret = item.get('secret')
+                            if host and port and secret and _valid_port(str(port)):
+                                proxies_set.add(f"tg://proxy?server={host}&port={port}&secret={secret}")
+                elif isinstance(data, dict) and 'results' in data:
+                    for item in data['results']:
+                        if isinstance(item, dict):
+                            host = item.get('host') or item.get('server')
+                            port = item.get('port')
+                            secret = item.get('secret')
+                            if host and port and secret and _valid_port(str(port)):
+                                proxies_set.add(f"tg://proxy?server={host}&port={port}&secret={secret}")
+            except Exception:
+                pass
+        return list(proxies_set)
+
+    @classmethod
+    def fetch_github_proxies(cls) -> List[str]:
+        proxies_set = set()
+        session = cls._get_session()
+        for url in cls.GITHUB_PROXY_SOURCES:
+            try:
+                response = session.get(url, timeout=10)
+                if response.status_code == 200:
+                    found = cls.extract_proxies_from_text(response.text)
+                    proxies_set.update(found)
+            except Exception:
+                continue
+        return list(proxies_set)
+
+    @classmethod
+    def check_top_github_proxies(cls, limit: int = 15) -> List[Dict]:
+        raw_proxies = cls.fetch_github_proxies()
+        valid_results = []
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS * 3) as executor:
+            future_to_link = {executor.submit(cls.check_single_fast, link): link for link in raw_proxies}
+            for future in as_completed(future_to_link):
+                try:
+                    is_valid, result = future.result()
+                    if is_valid:
+                        valid_results.append(result)
+                except Exception:
+                    continue
+        valid_results.sort(key=lambda x: x.get('connection_score', 0), reverse=True)
+        return valid_results[:limit]
+
+    @staticmethod
+    def parse_proxy_link(url: str) -> Optional[Dict[str, str]]:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            params = urllib.parse.parse_qs(parsed.query)
+            if 'proxy' in url or 'secret' in url:
+                if not all(k in params for k in ['server', 'port', 'secret']):
+                    match = re.search(r'server=([^&]+)&port=(\d+)&secret=([^&]+)', url)
+                    if match:
+                        server_val, port_val, secret_val = match.groups()
+                    else:
+                        return None
+                else:
+                    server_val = params['server'][0]
+                    port_val = params['port'][0]
+                    secret_val = params['secret'][0]
+                secret = secret_val.strip()
+                if not all(c in '0123456789abcdefABCDEF' for c in secret):
+                    missing_padding = len(secret) % 4
+                    if missing_padding:
+                        secret += '=' * (4 - missing_padding)
+                    try:
+                        secret = base64.urlsafe_b64decode(secret).hex()
+                    except Exception:
+                        pass
+                protocol = 'mtproto'
+                if secret.startswith(MT_PROTO_SECRET_TYPES['fake_tls']):
+                    protocol = 'mtproto-fake-tls'
+                elif secret.startswith(MT_PROTO_SECRET_TYPES['padded']):
+                    protocol = 'mtproto-padded'
+                return {
+                    'type': 'mtproto',
+                    'server': server_val,  
+                    'port': int(port_val),
+                    'secret': secret,
+                    'protocol': protocol,
+                    'secret_type': secret[:2] if len(secret) >= 2 else 'plain'
+                }
+            elif 'socks' in url:
+                if not all(k in params for k in ['server', 'port']):
+                    return None
+                return {
+                    'type': 'socks5',
+                    'server': params['server'][0],
+                    'port': int(params['port'][0]),
+                    'user': params.get('user', [None])[0],
+                    'password': params.get('pass', [None])[0],
+                    'protocol': 'socks5',
+                    'secret_type': 'plain'
+                }
+            else:
+                return None
+        except Exception:
+            return None
+
+    @staticmethod
+    def validate_secret(secret: str) -> Tuple[bool, str]:
+        if len(secret) < 32:
+            return False, "Секрет слишком короткий"
+        clean_secret = secret
+        prefix_type = 'plain'
+        if secret[:2] in MT_PROTO_SECRET_TYPES.values():
+            prefix_type = next((k for k, v in MT_PROTO_SECRET_TYPES.items() if v == secret[:2]), 'plain')
+            clean_secret = secret[2:]
+        if not re.match(r'^[0-9a-fA-F]+$', clean_secret):
+            return False, "Неверный формат HEX"
+        if len(clean_secret) < 32:
+            return False, f"Слишком короткий ключ ({len(clean_secret)})"
+        try:
+            decoded = bytes.fromhex(clean_secret)
+            if prefix_type == 'fake_tls' and len(decoded) < 17:
+                return False, "Fake-TLS: недостаточная длина"
+            return True, f"Валидный {prefix_type} секрет ({len(decoded)} байт)"
+        except ValueError:
+            return False, "Ошибка декодирования HEX"
+
+    @staticmethod
+    def check_port_open(host: str, port: int, timeout: float = 5.0) -> Tuple[bool, str]:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(timeout)
+                result = sock.connect_ex((host, port))
+            if result == 0:
+                return True, "Открыт"
+            return False, f"Закрыт (код: {result})"
+        except socket.timeout:
+            return False, "Таймаут подключения"
+        except socket.gaierror:
+            return False, "DNS не разрешён"
+        except Exception as e:
+            return False, f"Ошибка: {str(e)[:60]}"
+
+    @staticmethod
+    def measure_ping(host: str, port: int, timeout: float = 5.0) -> Tuple[Optional[float], Optional[float], str]:
+        pings = []
+        for _ in range(3):
+            try:
+                start = time.monotonic()
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(timeout)
+                    sock.connect((host, port))
+                pings.append((time.monotonic() - start) * 1000)
+            except Exception:
+                pass
+        if not pings:
+            return None, None, "Таймаут"
+        avg_ping = round(sum(pings) / len(pings), 2)
+        jitter = round(max(pings) - min(pings), 2) if len(pings) > 1 else 0.0
+        return avg_ping, jitter, "OK"
+
+    @staticmethod
+    def _is_ip_in_whitelist_ranges(ip_str: str) -> bool:
+        try:
+            ip = ip_address(ip_str)
+            for net in RU_WHITELIST_CIDR:
+                if ip in ip_network(net, strict=False):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _get_ip_asn_country(ip_str: str) -> Dict[str, Any]:
+        cached = MTProtoChecker._asn_cache.get(ip_str)
+        if cached: return cached
+        result = {"asn": 0, "country": "", "error": None}
+        try:
+            session = MTProtoChecker._get_session()
+            resp = session.get(f"https://ipapi.co/{ip_str}/json/", timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                asn_str = data.get("asn", "AS0")
+                asn = int(asn_str.replace("AS", "")) if asn_str != "AS0" else 0
+                result["asn"] = asn
+                result["country"] = data.get("country_code", "")
+        except Exception:
+            pass
+        MTProtoChecker._asn_cache.set(ip_str, result)
+        return result
+
+    @staticmethod
+    def _test_raw_tcp_handshake(ip_str: str, port: int = 443, timeout: float = 2.5) -> bool:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((ip_str, port))
+            sock.close()
+            return result == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _detect_bs_compat_proxy(secret: str) -> Dict[str, Any]:
+        result = {
+            'is_bs_compat': False,
+            'compat_source': '',
+            'sni_domain': '',
+            'service_name': '',
+            'is_russian_service': False,
+            'is_blocked_sni': False,
+        }
+        sni = _decode_domain(secret)
+        if not sni: return result
+        result['sni_domain'] = sni
+        sni_lower = sni.lower()
+        if MTProtoChecker._smart_sni_check(sni):
+            result['is_bs_compat'] = True
+            result['compat_source'] = 'russian_government'
+            result['service_name'] = sni
+            result['is_russian_service'] = True
+            return result
+        for b in BLOCKED_SNI_LIST:
+            if b in sni_lower:
+                result['is_blocked_sni'] = True
+                result['service_name'] = b.capitalize()
+                return result
+        for ru_dom in BS_COMPAT_SNI_RU:
+            if ru_dom in sni_lower:
+                result['is_bs_compat'] = True
+                result['compat_source'] = 'russian'
+                result['service_name'] = ru_dom.capitalize()
+                result['is_russian_service'] = True
+                return result
+        return result
+
+    @staticmethod
+    def _build_fake_tls_client_hello(sni_domain: str, secret_bytes: bytes) -> bytes:
+        grease_values = [0x0a, 0x1a, 0x2a, 0x3a, 0x4a, 0x5a, 0x6a, 0x7a, 0x8a, 0x9a, 0xaa, 0xba, 0xca, 0xda, 0xea, 0xfa]
+        grease_b = random.choice(grease_values)
+        grease = bytes([grease_b, grease_b])
+        client_random = struct.pack('>I', int(time.time())) + secrets.token_bytes(28)
+        session_id = secrets.token_bytes(32)
+        cipher_suites = grease + b'\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30\xcc\xa9\xcc\xa8\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x00\x0a'
+        compression = b'\x01\x00'
+        exts = b''
+        exts += grease + b'\x00\x00'
+        if sni_domain:
+            sni_b = sni_domain.encode('ascii')
+            sni_entry = b'\x00' + struct.pack('>H', len(sni_b)) + sni_b
+            sni_list = struct.pack('>H', len(sni_entry)) + sni_entry
+            exts += b'\x00\x00' + struct.pack('>H', len(sni_list)) + sni_list
+        exts += b'\x00\x17\x00\x00'
+        exts += b'\xff\x01\x00\x01\x00'
+        groups = grease + b'\x00\x1d\x00\x17\x00\x18\x00\x19\x01\x00\x01\x01'
+        groups_data = struct.pack('>H', len(groups)) + groups
+        exts += b'\x00\x0a' + struct.pack('>H', len(groups_data)) + groups_data
+        exts += b'\x00\x0b\x00\x02\x01\x00'
+        exts += b'\x00\x23\x00\x00'
+        proto_list = b'\x02h2\x08http/1.1'
+        alpn_data = struct.pack('>H', len(proto_list)) + proto_list
+        exts += b'\x00\x10' + struct.pack('>H', len(alpn_data)) + alpn_data
+        exts += b'\x00\x05\x00\x05\x01\x00\x00\x00\x00'
+        sig_list = bytes.fromhex('0403080404010503080508060601020104020202')
+        sig_data = struct.pack('>H', len(sig_list)) + sig_list
+        exts += b'\x00\x0d' + struct.pack('>H', len(sig_data)) + sig_data
+        exts += b'\x00\x12\x00\x00'
+        x25519_pub = secrets.token_bytes(32)
+        ks_grease = grease + b'\x00\x01\x00'
+        ks_x25519 = b'\x00\x1d' + struct.pack('>H', 32) + x25519_pub
+        ks_list = ks_grease + ks_x25519
+        ks_data = struct.pack('>H', len(ks_list)) + ks_list
+        exts += b'\x00\x33' + struct.pack('>H', len(ks_data)) + ks_data
+        exts += b'\x00\x2d\x00\x02\x01\x01'
+        sv_list = grease + b'\x03\x04\x03\x03'
+        sv_data = struct.pack('B', len(sv_list)) + sv_list
+        exts += b'\x00\x2b' + struct.pack('>H', len(sv_data)) + sv_data
+        exts += b'\x00\x1b\x00\x03\x02\x00\x02'
+        alps_proto = b'\x00\x03\x02h2'
+        exts += b'\x44\x69' + struct.pack('>H', len(alps_proto)) + alps_proto
+        exts += grease + b'\x00\x01\x00'
+        exts_block = struct.pack('>H', len(exts)) + exts
+        hello_body = b'\x03\x03' + client_random + struct.pack('B', 32) + session_id + struct.pack('>H', len(cipher_suites)) + cipher_suites + compression + exts_block
+        handshake_msg = b'\x01' + struct.pack('>I', len(hello_body))[1:] + hello_body
+        return b'\x16\x03\x01' + struct.pack('>H', len(handshake_msg)) + handshake_msg
+
+    @staticmethod
+    def _build_obfuscated_init(protocol_tag: bytes) -> Tuple[bytes, bytes, bytes, bytes, bytes]:
+        FORBIDDEN_FIRST = {0xef, 0x44, 0x53, 0x20, 0x47, 0x50, 0x4f, 0x16, 0x80, 0x00}
+        FORBIDDEN_4 = [
+            b'GET ', b'POST', b'HEAD', b'OPTI',
+            bytes([0xee] * 4), bytes([0xdd] * 4), bytes([0xef] * 4),
+            b'\x16\x03\x01\x00', b'\x16\x03\x03\x00',
+        ]
+        while True:
+            init = bytearray(secrets.token_bytes(64))
+            if init[0] in FORBIDDEN_FIRST: continue
+            if any(bytes(init[:4]).startswith(h) for h in FORBIDDEN_4): continue
+            if bytes(init[4:8]) == b'\x00\x00\x00\x00': continue
+            break
+        init[56:60] = protocol_tag
+        encrypt_key = bytes(init[8:40])
+        encrypt_iv = bytes(init[40:56])
+        decrypt_key = bytes(reversed(init[8:40]))
+        decrypt_iv = bytes(reversed(init[40:56]))
+        encrypted = _try_aes_ctr(bytes(init), encrypt_key, encrypt_iv)
+        packet = bytes(init[:56]) + encrypted[56:64] if encrypted else bytes(init)
+        return packet, encrypt_key, encrypt_iv, decrypt_key, decrypt_iv
+
+    @staticmethod
+    def _classify_handshake_response(response: bytes, secret_type: str) -> Tuple[bool, str]:
+        if not response: return False, "Нет ответа (FIN сброс)"
+        head = response[:4]
+        if head == b'\xff\xff\xff\xff': return False, "MTProto отклонено"
+        low = response[:16].lower()
+        if b'HTTP/' in response[:8] or b'<html' in low or b'<!doc' in low:
+            return False, "Перехват: HTTP-страница"
+        if head[:2] == b'\x15\x03': return False, "TLS Alert (Блокировка)"
+        if secret_type == MT_PROTO_SECRET_TYPES['fake_tls']:
+            if response[0:1] == b'\x16' and response[1:3] in (b'\x03\x01', b'\x03\x03') and len(response) >= 50:
+                return True, f"TLS ServerHello ({len(response)} байт)"
+            return False, f"Слишком короткий ответ ({len(response)} байт)"
+        if secret_type in (MT_PROTO_SECRET_TYPES['padded'], MT_PROTO_SECRET_TYPES['plain'], ''):
+            if len(response) >= 64: return True, f"MTProto ответ ({len(response)} байт)"
+            if len(response) >= 16 and response[0] not in (0x14, 0x15, 0x16, 0x17):
+                return True, f"MTProto короткий ({len(response)} байт)"
+            return False, f"Слишком короткий ответ ({len(response)} байт)"
+        return False, f"Неопознанный ответ ({len(response)} байт)"
+
+    @staticmethod
+    def mtproto_handshake_test(host: str, port: int, secret: str, timeout: float = 10.0) -> Tuple[bool, str]:
+        secret_type = secret[:2] if len(secret) >= 2 else ''
+        for attempt in range(3):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(timeout)
+                    sock.connect((host, port))
+                    if secret_type == MT_PROTO_SECRET_TYPES['fake_tls']:
+                        raw_key = secret[2:34]
+                        secret_bytes = bytes.fromhex(raw_key) if len(raw_key) == 32 else secrets.token_bytes(16)
+                        sni_domain = _decode_domain(secret)
+                        if not sni_domain or '.' not in sni_domain:
+                            sni_domain = random.choice(BS_COMPAT_SNI_RU)
+                        header = MTProtoChecker._build_fake_tls_client_hello(sni_domain, secret_bytes)
+                    elif secret_type == MT_PROTO_SECRET_TYPES['padded']:
+                        header, *_ = MTProtoChecker._build_obfuscated_init(b'\xdd\xdd\xdd\xdd')
+                    else:
+                        header, *_ = MTProtoChecker._build_obfuscated_init(b'\xef\xef\xef\xef')
+                    sock.sendall(header)
+                    sock.settimeout(5.0)
+                    try:
+                        response = sock.recv(2048)
+                        return MTProtoChecker._classify_handshake_response(response, secret_type)
+                    except socket.timeout:
+                        return False, "Таймаут чтения ответа"
+                    except ConnectionResetError:
+                        return False, "Соединение сброшено (RST)"
+                    except OSError:
+                        if attempt < 2:
+                            timeout = min(timeout * 1.5, 15.0)
+                            time.sleep(0.1 * (attempt + 1))
+                            continue
+                        return False, "Сетевая ошибка при чтении"
+            except socket.timeout:
+                if attempt < 2:
+                    timeout = min(timeout * 1.5, 15.0)
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                return False, "Таймаут подключения"
+            except ConnectionRefusedError:
+                return False, "В соединении отказано (Закрыто)"
+            except ConnectionResetError:
+                if attempt < 2:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                return False, "RST на connect"
+            except socket.error as e:
+                return False, f"Ошибка сокета: {str(e)[:40]}"
+            except Exception as e:
+                return False, f"Ошибка: {str(e)[:40]}"
+        return False, "Отказ после попыток"
+
+    @staticmethod
+    def _create_aes_ctr(key: bytes, iv: bytes):
+        padded_key = (key + b'\x00' * 32)[:32]
+        padded_iv = (iv + b'\x00' * 16)[:16]
+        if HAS_PYCRYPTODOME:
+            try:
+                return _AES.new(padded_key, _AES.MODE_CTR, initial_value=padded_iv, nonce=b'')
+            except Exception:
+                pass
+        if HAS_CRYPTOGRAPHY:
+            try:
+                return _Cipher(_alg.AES(padded_key), _modes.CTR(padded_iv)).encryptor()
+            except Exception:
+                pass
+        return None
+
+    @staticmethod
+    def _aes_ctr_update(cipher, data: bytes) -> bytes:
+        if cipher is None: return data
+        return cipher.update(data)
+
+    @staticmethod
+    def fast_mtproto_req_pq_test(host: str, port: int, secret: str, timeout: float = 5.0) -> Tuple[bool, str, float]:
+        start_time = time.monotonic()
+        try:
+            secret_hex = secret[2:] if secret[:2] in ('dd', 'ee', '') else secret
+            if secret.startswith('ee'):
+                return False, "FakeTLS не поддерживается в быстром тесте", 0.0
+            
+            secret_bytes = bytes.fromhex(secret_hex)
+            proto_tag = b'\xdd\xdd\xdd\xdd' if secret.startswith('dd') else b'\xee\xee\xee\xee'
+            mode = 'secure' if secret.startswith('dd') else 'intermediate'
+            
+            dc_id = 1
+            while True:
+                init = bytearray(os.urandom(64))
+                if init[0] == 0xEF: continue 
+                if bytes(init[:4]) in [b'GET ', b'POST', b'HEAD', b'OPTI', b'\x00\x00\x00\x00', b'\xef\xef\xef\xef', b'\xee\xee\xee\xee', b'\xdd\xdd\xdd\xdd']: continue
+                if bytes(init[4:8]) == b'\x00\x00\x00\x00': continue
+                break
+            
+            init[56:60] = proto_tag
+            init[60] = dc_id & 0xFF
+            init[61:64] = b'\x00\x00\x00'
+            
+            encrypt_key_material = bytes(init[8:40])
+            encrypt_iv = bytes(init[40:56])
+            decrypt_key_material = bytes(init[55:23:-1])
+            decrypt_iv = bytes(init[23:7:-1])
+            
+            enc_key = hashlib.sha256(encrypt_key_material + secret_bytes).digest()
+            dec_key = hashlib.sha256(decrypt_key_material + secret_bytes).digest()
+            
+            enc = MTProtoChecker._create_aes_ctr(enc_key, encrypt_iv)
+            dec = MTProtoChecker._create_aes_ctr(dec_key, decrypt_iv)
+            if not enc or not dec:
+                return False, "AES не поддерживается", 0.0
+                
+            encrypted_init = MTProtoChecker._aes_ctr_update(enc, bytes(init))
+            init[56:64] = encrypted_init[56:64]
+            
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(timeout)
+                sock.connect((host, port))
+                sock.sendall(bytes(init))
+                
+                nonce = os.urandom(16)
+                req_payload = struct.pack('<I', 0xBE7E8EF1) + nonce
+                
+                if mode == 'secure':
+                    padding_len = os.urandom(1)[0] % 4
+                    padding = os.urandom(padding_len)
+                    frame = struct.pack('<I', len(req_payload) + padding_len) + req_payload + padding
+                elif mode == 'intermediate':
+                    frame = struct.pack('<I', len(req_payload)) + req_payload
+                else:
+                    l = len(req_payload) // 4
+                    frame = (bytes([l]) if l < 127 else b'\x7f' + struct.pack('<I', l)[1:]) + req_payload
+                    
+                encrypted_req = MTProtoChecker._aes_ctr_update(enc, frame)
+                sock.sendall(encrypted_req)
+                
+                if mode in ('secure', 'intermediate'):
+                    enc_len = sock.recv(4)
+                    if len(enc_len) < 4: return False, "Обрыв при чтении длины", 0.0
+                    dec_len = MTProtoChecker._aes_ctr_update(dec, enc_len)
+                    frame_len = struct.unpack('<I', dec_len)[0]
+                    if frame_len > 2 * 1024 * 1024: return False, "Слишком большой фрейм", 0.0
+                    
+                    enc_payload = b''
+                    while len(enc_payload) < frame_len:
+                        chunk = sock.recv(frame_len - len(enc_payload))
+                        if not chunk: break
+                        enc_payload += chunk
+                    if len(enc_payload) < frame_len: return False, "Обрыв при чтении фрейма", 0.0
+                    payload = MTProtoChecker._aes_ctr_update(dec, enc_payload)
+                else:
+                    enc_first = sock.recv(1)
+                    if not enc_first: return False, "Обрыв", 0.0
+                    first = MTProtoChecker._aes_ctr_update(dec, enc_first)[0]
+                    if first < 127:
+                        frame_len = first * 4
+                    else:
+                        enc_rest = sock.recv(3)
+                        rest = MTProtoChecker._aes_ctr_update(dec, enc_rest)
+                        frame_len = struct.unpack('<I', b'\x00' + rest)[0]
+                    
+                    enc_payload = b''
+                    while len(enc_payload) < frame_len:
+                        chunk = sock.recv(frame_len - len(enc_payload))
+                        if not chunk: break
+                        enc_payload += chunk
+                    payload = MTProtoChecker._aes_ctr_update(dec, enc_payload)
+                    
+                if len(payload) < 24: return False, "Короткий ответ", 0.0
+                if payload[:8] != b'\x00' * 8: return False, "Не MTProto ответ", 0.0
+                msg_len = struct.unpack('<I', payload[16:20])[0]
+                if msg_len > len(payload) - 20: return False, "Неверная длина сообщения", 0.0
+                body = payload[20:20+msg_len]
+                if len(body) < 36: return False, "Короткое тело", 0.0
+                constructor = struct.unpack('<I', body[:4])[0]
+                if constructor != 0x05162463: return False, f"Не resPQ (0x{constructor:08x})", 0.0
+                res_nonce = body[4:20]
+                if res_nonce != nonce: return False, "Nonce не совпадает", 0.0
+                
+                elapsed = (time.monotonic() - start_time) * 1000
+                return True, f"resPQ получен ({elapsed:.1f}мс)", elapsed
+                
+        except socket.timeout:
+            return False, "Таймаут", 0.0
+        except Exception as e:
+            return False, f"Ошибка: {str(e)[:40]}", 0.0
+
+    @staticmethod
+    async def _test_single_carrier(proxy: Dict, carrier: str, prof: Dict, timeout: float) -> Tuple[str, bool]:
+        if proxy.get('type') == 'socks5' and HAS_CURL_CFFI:
+            try:
+                if proxy.get('user'):
+                    proxies = {
+                        "http": f"socks5://{proxy['user']}:{proxy['password']}@{proxy['server']}:{proxy['port']}",
+                        "https": f"socks5://{proxy['user']}:{proxy['password']}@{proxy['server']}:{proxy['port']}"
+                    }
+                else:
+                    proxies = {
+                        "http": f"socks5://{proxy['server']}:{proxy['port']}",
+                        "https": f"socks5://{proxy['server']}:{proxy['port']}"
+                    }
+                r = _cffi_requests.get(
+                    "https://api.telegram.org",
+                    proxies=proxies,
+                    impersonate=prof["impersonate"],
+                    headers={"User-Agent": prof["ua"]},
+                    timeout=timeout
+                )
+                if r.status_code in (200, 401, 404, 302):
+                    return carrier, True
+            except Exception:
+                pass
+        client = None
+        try:
+            if proxy.get('type') == 'mtproto':
+                proxy_config = (proxy['server'], proxy['port'], proxy['secret'])
+                client = TelegramClient(
+                    StringSession(), api_id=prof["api_id"], api_hash=prof["api_hash"],
+                    connection=ChromeFingerprintFakeTLSConnection,
+                    proxy=proxy_config, timeout=timeout, connection_retries=2,
+                    device_model=prof["model"], system_version=prof["sys_ver"],
+                    app_version=prof["app_ver"], lang_code="ru",
+                    system_lang_code="ru_RU"
+                )
+            elif proxy.get('type') == 'socks5':
+                if not HAS_PYSOCKS: return carrier, False
+                proxy_config = {
+                    'proxy_type': 'socks5', 'addr': proxy['server'],
+                    'port': proxy['port'], 'username': proxy.get('user'),
+                    'password': proxy.get('password')
+                }
+                client = TelegramClient(
+                    StringSession(), api_id=prof["api_id"], api_hash=prof["api_hash"],
+                    connection=ConnectionTcpFull, proxy=proxy_config,
+                    timeout=timeout, connection_retries=2,
+                    device_model=prof["model"], system_version=prof["sys_ver"],
+                    app_version=prof["app_ver"], lang_code="ru",
+                    system_lang_code="ru_RU"
+                )
+            else:
+                return carrier, False
+            try:
+                await asyncio.wait_for(client.connect(), timeout=timeout)
+            except (ConnectionResetError, OSError, asyncio.CancelledError, asyncio.TimeoutError):
+                return carrier, False
+            except Exception:
+                return carrier, False
+            is_conn = False
+            try:
+                is_conn = client.is_connected()
+                if is_conn:
+                    auth_key = getattr(client.session, 'auth_key', None) or getattr(client, 'auth_key', None)
+                    if auth_key is None:
+                        is_conn = False
+            except Exception:
+                is_conn = False
+            return carrier, is_conn
+        except Exception:
+            return carrier, False
+        finally:
+            await _safe_disconnect(client)
+
+    @staticmethod
+    async def _check_carriers_async(proxy: Dict, timeout: float = 8.0) -> Dict[str, bool]:
+        results = {"MTS": False, "Beeline": False, "Megafon": False, "Tele2": False}
+        tasks = []
+        for carrier, profiles in CARRIER_PROFILES.items():
+            prof = random.choice(profiles)
+            tasks.append(MTProtoChecker._test_single_carrier(proxy, carrier, prof, timeout))
+        res_list = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in res_list:
+            if isinstance(r, tuple) and len(r) == 2:
+                results[r[0]] = r[1]
+        return results
+
+    @staticmethod
+    def run_carrier_checks(proxy: Dict, timeout: float = 8.0) -> Dict[str, bool]:
+        loop = None
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            _install_asyncio_exception_handler(loop)
+            return loop.run_until_complete(MTProtoChecker._check_carriers_async(proxy, timeout))
+        except Exception:
+            return {"MTS": False, "Beeline": False, "Megafon": False, "Tele2": False}
+        finally:
+            if loop is not None:
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    try:
+                        loop.run_until_complete(asyncio.sleep(0.05))
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
+                    try:
+                        asyncio.set_event_loop(None)
+                    except Exception:
+                        pass
+
+    @classmethod
+    def get_geolocation(cls, ip: str) -> Dict[str, str]:
+        cached = cls._geo_cache.get(ip)
+        if cached: return cached
+        cls._rate_limiter.wait()
+        with cls._geo_lock:
+            now = time.time()
+            elapsed = now - cls._last_geo_request
+            if elapsed < GEO_REQUEST_DELAY:
+                time.sleep(GEO_REQUEST_DELAY - elapsed)
+            cls._last_geo_request = time.time()
+        session = cls._get_session()
+        for api_url in GEO_API_URLS:
+            try:
+                response = session.get(api_url.format(ip), timeout=5)
+                if response.status_code == 429: continue
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, dict):
+                        if data.get('success') or data.get('status') == 'success' or 'country' in data or 'country_name' in data:
+                            country = data.get('country') or data.get('country_name') or data.get('countryName', 'N/A')
+                            region = data.get('region') or data.get('regionName', 'N/A')
+                            isp = (data.get('isp') or data.get('org') or data.get('connection', {}).get('isp', 'N/A'))
+                            result = {
+                                'country': country, 'countryCode': data.get('countryCode') or data.get('country_code', 'N/A'),
+                                'region': region, 'regionCode': data.get('regionCode') or data.get('region_code', 'N/A'),
+                                'city': data.get('city', 'N/A'), 'zip': data.get('zip') or data.get('postal', 'N/A'),
+                                'isp': isp, 'org': data.get('org') or data.get('connection', {}).get('org', 'N/A'),
+                                'as': (data.get('as') or data.get('asn') or data.get('connection', {}).get('asn', 'N/A')),
+                                'timezone': (data.get('timezone', 'N/A') if isinstance(data.get('timezone'), str) else data.get('timezone', {}).get('id', 'N/A')),
+                                'lat': data.get('lat') or data.get('latitude', 'N/A'),
+                                'lon': data.get('lon') or data.get('longitude', 'N/A'),
+                                'proxy': data.get('proxy') or data.get('security', {}).get('proxy', False),
+                                'hosting': data.get('hosting') or data.get('security', {}).get('hosting', False),
+                                'mobile': data.get('mobile', False)
+                            }
+                            cls._geo_cache.set(ip, result)
+                            return result
+            except Exception:
+                continue
+        result = {'error': 'Не удалось получить геолокацию'}
+        cls._geo_cache.set(ip, result)
+        return result
+
+    @staticmethod
+    def resolve_ip(hostname: str) -> Tuple[Optional[str], str]:
+        cached_ip = MTProtoChecker._dns_cache.get(hostname)
+        if cached_ip is not None:
+            if cached_ip == _DNS_FAIL:
+                return None, "DNS не разрешён (кэш)"
+            return cached_ip, "OK (кэш)"
+        try:
+            ip = socket.gethostbyname(hostname)
+            MTProtoChecker._dns_cache.set(hostname, ip)
+            return ip, "OK"
+        except socket.gaierror:
+            MTProtoChecker._dns_cache.set(hostname, _DNS_FAIL)
+            return None, "DNS не разрешён"
+        except Exception as e:
+            return None, str(e)[:50]
+
+    @staticmethod
+    def detect_proxy_type(secret: str) -> str:
+        if secret.startswith(MT_PROTO_SECRET_TYPES['fake_tls']):
+            return "Fake-TLS (обфускация под HTTPS)"
+        elif secret.startswith(MT_PROTO_SECRET_TYPES['padded']):
+            return "Padded (дополнение пакетов)"
+        return "Standard (базовая обфускация)"
+
+    @staticmethod
+    def check_secret_format(secret: str) -> Dict[str, Any]:
+        result = {'valid': False, 'type': 'unknown', 'length': len(secret), 'hex_valid': False, 'message': ''}
+        if len(secret) < 32:
+            result['message'] = f"Секрет слишком короткий ({len(secret)} < 32)"
+            return result
+        clean_secret = secret
+        if secret[:2] in MT_PROTO_SECRET_TYPES.values():
+            result['type'] = next((k for k, v in MT_PROTO_SECRET_TYPES.items() if v == secret[:2]), 'unknown')
+            clean_secret = secret[2:]
+        else:
+            result['type'] = 'plain'
+        if re.match(r'^[0-9a-fA-F]+$', clean_secret):
+            result['hex_valid'] = True
+            try:
+                decoded = bytes.fromhex(clean_secret)
+                result['valid'] = True
+                result['message'] = f"Валидный {result['type']} секрет ({len(decoded)} байт)"
+            except ValueError:
+                result['message'] = "Ошибка декодирования HEX"
+        else:
+            result['message'] = "Неверный формат HEX"
+        return result
+
+    @staticmethod
+    def advanced_connection_test(host: str, port: int, secret: str, timeout: float = 8.0) -> Tuple[bool, str, Dict]:
+        test_results = {'tcp_connect': False, 'tcp_latency': None, 'ssl_test': False, 'http_probe': False, 'response_time': None}
+        try:
+            start_time = time.monotonic()
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(timeout)
+                connect_result = sock.connect_ex((host, port))
+                test_results['tcp_connect'] = (connect_result == 0)
+                if test_results['tcp_connect']:
+                    test_results['tcp_latency'] = round((time.monotonic() - start_time) * 1000, 2)
+                    try:
+                        sock.sendall(b'\x16\x03\x01')
+                        sock.settimeout(2.0)
+                        response = sock.recv(5)
+                        test_results['ssl_test'] = (len(response) > 0)
+                    except Exception:
+                        pass
+            if test_results['tcp_connect']:
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as http_sock:
+                        http_sock.settimeout(3.0)
+                        http_sock.connect((host, port))
+                        http_sock.sendall(f"HEAD / HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
+                        http_sock.settimeout(3.0)
+                        http_response = http_sock.recv(1024)
+                        test_results['http_probe'] = (len(http_response) > 0)
+                except Exception:
+                    pass
+                test_results['response_time'] = round((time.monotonic() - start_time) * 1000, 2)
+                return True, "Соединение установлено", test_results
+            return False, "TCP соединение не удалось", test_results
+        except Exception as e:
+            return False, str(e)[:60], test_results
+
+    @staticmethod
+    def check_ip_in_telegram_range(ip: str) -> bool:
+        try:
+            test_ip = ip_address(ip)
+            for tg_range in TELEGRAM_IP_RANGES:
+                if test_ip in ip_network(tg_range):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
+    def _test_whitelist_status(proxy: Dict, mtproto_ok: bool = False, port_open: bool = False, ip: str = "", ping: Optional[float] = None) -> Tuple[str, bool]:
+        if not proxy or not port_open or not mtproto_ok:
+            return "Проверка не завершена", False
+        secret = proxy.get('secret', '')
+        if MTProtoChecker.check_ip_in_telegram_range(ip):
+            sni = _decode_domain(secret) if secret.startswith('ee') else ""
+            if sni and '.' in sni:
+                return f"В БС (IP Telegram, SNI: {sni})", True
+            return "В БС (IP Telegram)", True
+        has_whitelisted_sni = False
+        sni_domain = ""
+        if secret.startswith('ee'):
+            bs_compat = MTProtoChecker._detect_bs_compat_proxy(secret)
+            sni_domain = bs_compat.get('sni_domain', '')
+            if bs_compat.get('is_blocked_sni'):
+                return f"Заблокированный SNI ({bs_compat['service_name']})", False
+            if bs_compat.get('is_bs_compat') and bs_compat.get('is_russian_service'):
+                has_whitelisted_sni = True
+            elif sni_domain and sni_domain in BS_COMPAT_SNI_RU:
+                has_whitelisted_sni = True
+        ip_is_white = False
+        ip_status = ""
+        if MTProtoChecker._is_ip_in_whitelist_ranges(ip):
+            ip_is_white = True
+            ip_status = "CIDR РФ"
+        else:
+            asn_data = MTProtoChecker._get_ip_asn_country(ip)
+            if asn_data.get("asn") in RU_TRUSTED_ASNS:
+                ip_is_white = True
+                ip_status = f"ASN {asn_data['asn']} доверенный"
+            elif asn_data.get("country") == "RU":
+                ip_is_white = True
+                ip_status = f"IP РФ (ASN {asn_data.get('asn', 0)})"
+        tspu_not_blocking = MTProtoChecker._test_raw_tcp_handshake(ip, 443)
+        if has_whitelisted_sni and ip_is_white and tspu_not_blocking:
+            return f"В БС (SNI: {sni_domain}, IP: {ip_status}, ТСПУ не блокирует)", True
+        if has_whitelisted_sni and ip_is_white:
+            return f"Вероятно в БС (SNI: {sni_domain}, IP: {ip_status}, ТСПУ не проверен)", True
+        if has_whitelisted_sni and tspu_not_blocking:
+            return f"Частично БС (SNI: {sni_domain}, ТСПУ не блокирует, IP не белый)", False
+        if ip_is_white and tspu_not_blocking and not secret.startswith('ee'):
+            return f"Возможно в БС (IP: {ip_status}, ТСПУ не блокирует, нет SNI)", False
+        if ip_is_white and tspu_not_blocking:
+            return f"Частично БС (IP: {ip_status}, ТСПУ не блокирует, SNI не из списка)", False
+        if has_whitelisted_sni:
+            return f"SNI из списка ({sni_domain}), но IP не белый", False
+        if tspu_not_blocking:
+            return "ТСПУ не блокирует, но нет SNI из списка и белого IP", False
+        if secret.startswith('ee'):
+            if sni_domain:
+                return f"Не в БС (SNI: {sni_domain}, не из списка)", False
+            return "Не в БС (Fake-TLS без проверенного SNI)", False
+        elif secret.startswith('dd'):
+            return "Не в БС (Padded, нет Fake-TLS)", False
+        return "Не в БС (Standard)", False
+
+    @staticmethod
+    def _collect_all_available_data(result: Dict):
+        defaults = {
+            'proxy': {}, 'secret_info': {'valid': False, 'type': 'unknown', 'length': 0, 'hex_valid': False, 'message': 'Не проверен'},
+            'geo': {'error': 'Не определена'}, 'advanced_test': {'tcp_connect': False, 'tcp_latency': None, 'ssl_test': False, 'http_probe': False, 'response_time': None},
+            'dns_status': 'Не проверен', 'port_status': 'Не проверен', 'ping_status': 'Не проверен', 'mtproto_msg': 'Не проверен',
+            'whitelist_status': 'Не определен', 'is_whitelist': False, 'bs_compat_info': {}, 'error': 'Неизвестная ошибка', 'carriers': {}
+        }
+        for k, v in defaults.items():
+            if k not in result or result[k] is None:
+                result[k] = v
+
+    @classmethod
+    def check_single_fast(cls, link: str) -> Tuple[bool, Dict]:
+        result = {
+            'link': link, 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'valid': False, 'error': None, 'proxy': None, 'ip': None, 'dns_status': '',
+            'ping': None, 'jitter': None, 'ping_status': '', 'port_open': False, 'port_status': '',
+            'mtproto_ok': False, 'mtproto_msg': 'Пропущено (Быстрая проверка)', 'geo': {}, 'secret_valid': False,
+            'secret_msg': 'Пропущено', 'secret_info': {}, 'proxy_type': '', 'connection_score': 0,
+            'advanced_test': {}, 'whitelist_status': 'Пропущено', 'is_whitelist': False, 'bs_compat_info': {},
+            'telethon_ok': False, 'telethon_msg': 'Пропущено', 'carriers': {}
+        }
+        try:
+            proxy_data = cls.parse_proxy_link(link)
+            if not proxy_data:
+                result['error'] = "Неверный формат ссылки"
+                return False, result
+            result['proxy'] = proxy_data
+            if proxy_data.get('type') == 'socks5':
+                result['proxy_type'] = 'SOCKS5'
+            else:
+                result['proxy_type'] = cls.detect_proxy_type(proxy_data.get('secret', ''))
+            ip, dns_status = cls.resolve_ip(proxy_data['server'])
+            result['dns_status'] = dns_status
+            if not ip:
+                result['error'] = f"DNS ошибка: {dns_status}"
+                return False, result
+            result['ip'] = ip
+            port_open, port_status = cls.check_port_open(ip, proxy_data['port'], timeout=3.0)
+            result['port_open'] = port_open
+            result['port_status'] = port_status
+            if not port_open:
+                result['error'] = f"Порт закрыт: {port_status}"
+                return False, result
+            ping, jitter, ping_status = cls.measure_ping(ip, proxy_data['port'], timeout=3.0)
+            result['ping'] = ping
+            result['jitter'] = jitter
+            result['ping_status'] = ping_status
+            
+            if proxy_data.get('type') == 'mtproto':
+                secret = proxy_data.get('secret', '')
+                if not secret.startswith('ee'):
+                    mtproto_ok, mtproto_msg, _ = cls.fast_mtproto_req_pq_test(ip, proxy_data['port'], secret, timeout=3.0)
+                else:
+                    mtproto_ok, mtproto_msg = cls.mtproto_handshake_test(ip, proxy_data['port'], secret, timeout=3.0)
+                result['mtproto_ok'] = mtproto_ok
+                result['mtproto_msg'] = mtproto_msg
+                if not mtproto_ok:
+                    result['error'] = mtproto_msg
+                    return False, result
+
+            result['geo'] = cls.get_geolocation(ip)
+            score = 50
+            if ping is not None:
+                if ping < 100: score += 50
+                elif ping < 250: score += 30
+                elif ping < 500: score += 10
+            result['connection_score'] = score
+            result['valid'] = True
+            cls._collect_all_available_data(result)
+            return True, result
+        except Exception as e:
+            result['error'] = str(e)[:100]
+            cls._collect_all_available_data(result)
+            return False, result
+
+    @classmethod
+    def check_single(cls, link: str) -> Tuple[bool, Dict]:
+        result = {
+            'link': link, 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'valid': False, 'error': None, 'proxy': None, 'ip': None, 'dns_status': '',
+            'ping': None, 'jitter': None, 'ping_status': '', 'port_open': False, 'port_status': '',
+            'mtproto_ok': False, 'mtproto_msg': '', 'geo': {}, 'secret_valid': False,
+            'secret_msg': '', 'secret_info': {}, 'proxy_type': '', 'connection_score': 0,
+            'advanced_test': {}, 'whitelist_status': '', 'is_whitelist': False, 'bs_compat_info': {},
+            'telethon_ok': False, 'telethon_msg': '', 'carriers': {}
+        }
+        try:
+            proxy_data = cls.parse_proxy_link(link)
+            if not proxy_data:
+                result['error'] = "Неверный формат ссылки"
+                return False, result
+            result['proxy'] = proxy_data
+            if proxy_data['type'] == 'socks5':
+                result['proxy_type'] = 'SOCKS5'
+                result['secret_valid'] = True
+                result['secret_msg'] = 'SOCKS5 прокси'
+                result['secret_info'] = {'valid': True, 'type': 'socks5', 'length': 0, 'hex_valid': False, 'message': 'SOCKS5 прокси'}
+                ip, dns_status = cls.resolve_ip(proxy_data['server'])
+                result['dns_status'] = dns_status
+                if not ip:
+                    result['error'] = f"DNS ошибка: {dns_status}"
+                    return False, result
+                result['ip'] = ip
+                result['geo'] = cls.get_geolocation(ip)
+                port_open, port_status = cls.check_port_open(ip, proxy_data['port'], timeout=5.0)
+                result['port_open'] = port_open
+                result['port_status'] = port_status
+                if not port_open:
+                    result['error'] = f"Порт закрыт: {port_status}"
+                    return False, result
+                ping, jitter, ping_status = cls.measure_ping(ip, proxy_data['port'], timeout=5.0)
+                result['ping'] = ping
+                result['jitter'] = jitter
+                result['ping_status'] = ping_status
+                carriers_res = cls.run_carrier_checks(proxy_data, timeout=6.0)
+                result['carriers'] = carriers_res
+                telethon_ok = any(carriers_res.values())
+                result['telethon_ok'] = telethon_ok
+                result['telethon_msg'] = "Успех" if telethon_ok else "Отказ"
+                socks_ok = telethon_ok
+                result['mtproto_ok'] = socks_ok
+                result['mtproto_msg'] = "SOCKS5 Подключен" if socks_ok else "SOCKS5 Отказ"
+                if not socks_ok:
+                    result['error'] = "Не удалось подключиться через операторов"
+                    result['valid'] = False
+                    cls._collect_all_available_data(result)
+                    return False, result
+                score = 0
+                if port_open: score += 33
+                if socks_ok: score += 34
+                if ping is not None and ping < 500: score += 33
+                result['connection_score'] = score
+                result['valid'] = True
+                cls._collect_all_available_data(result)
+                return True, result
+
+            result['proxy_type'] = cls.detect_proxy_type(proxy_data['secret'])
+            secret_info = cls.check_secret_format(proxy_data['secret'])
+            result['secret_info'] = secret_info
+            result['secret_valid'] = secret_info['valid']
+            result['secret_msg'] = secret_info['message']
+            if not secret_info['valid']:
+                result['error'] = f"Невалидный секрет: {secret_info['message']}"
+                return False, result
+            domain_extracted = _decode_domain(proxy_data['secret'])
+            if _is_blocked(proxy_data['secret'], domain_extracted):
+                result['error'] = f"Мусорный/Заблокированный домен ({domain_extracted})"
+                return False, result
+            bs_compat_info = cls._detect_bs_compat_proxy(proxy_data['secret'])
+            result['bs_compat_info'] = bs_compat_info
+            ip, dns_status = cls.resolve_ip(proxy_data['server'])
+            result['dns_status'] = dns_status
+            if not ip:
+                result['error'] = f"DNS ошибка: {dns_status}"
+                return False, result
+            result['ip'] = ip
+            result['geo'] = cls.get_geolocation(ip)
+            port_open, port_status = cls.check_port_open(ip, proxy_data['port'], timeout=5.0)
+            result['port_open'] = port_open
+            result['port_status'] = port_status
+            advanced_ok, advanced_msg, advanced_data = cls.advanced_connection_test(ip, proxy_data['port'], proxy_data['secret'], timeout=8.0)
+            result['advanced_test'] = advanced_data
+            if not port_open:
+                result['error'] = f"Порт закрыт: {port_status}"
+                return False, result
+            ping, jitter, ping_status = cls.measure_ping(ip, proxy_data['port'], timeout=5.0)
+            result['ping'] = ping
+            result['jitter'] = jitter
+            result['ping_status'] = ping_status
+            
+            secret = proxy_data.get('secret', '')
+            if not secret.startswith('ee'):
+                mtproto_ok, mtproto_msg, _ = cls.fast_mtproto_req_pq_test(ip, proxy_data['port'], secret, timeout=8.0)
+            else:
+                mtproto_ok, mtproto_msg = cls.mtproto_handshake_test(ip, proxy_data['port'], secret, timeout=8.0)
+            result['mtproto_ok'] = mtproto_ok
+            result['mtproto_msg'] = mtproto_msg
+            
+            carriers_res = cls.run_carrier_checks(proxy_data, timeout=6.0)
+            result['carriers'] = carriers_res
+            telethon_ok = any(carriers_res.values())
+            result['telethon_ok'] = telethon_ok
+            result['telethon_msg'] = "Успех" if telethon_ok else "Отказ"
+            whitelist_msg, is_wl = cls._test_whitelist_status(proxy_data, mtproto_ok, port_open, ip, ping)
+            result['whitelist_status'] = whitelist_msg
+            result['is_whitelist'] = is_wl
+            if not telethon_ok and not mtproto_ok:
+                result['error'] = mtproto_msg
+                cls._collect_all_available_data(result)
+                return False, result
+            score = 0
+            if port_open: score += 20
+            if mtproto_ok: score += 15
+            if telethon_ok: score += 20
+            if ping is not None:
+                if ping < 80: score += 20
+                elif ping < 150: score += 15
+                elif ping < 300: score += 10
+                elif ping < 500: score += 5
+            if is_wl: score += 15
+            if bs_compat_info.get('is_bs_compat') and bs_compat_info.get('is_russian_service'):
+                score += 10
+            result['connection_score'] = min(score, 100)
+            result['valid'] = telethon_ok or mtproto_ok
+            if not result['valid']:
+                result['error'] = "Провалены тесты соединения"
+            cls._collect_all_available_data(result)
+            return result['valid'], result
+        except Exception as e:
+            result['error'] = str(e)[:100]
+            cls._collect_all_available_data(result)
+            return False, result
+
+class MTProtoCheckerGUI:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title(f"MTProto Proxy Checker BY MT v{VERSION}")
+        self.root.minsize(1100, 720)
+        window_width, window_height = 1100, 720
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x_pos = (screen_width // 2) - (window_width // 2)
+        y_pos = (screen_height // 2) - (window_height // 2)
+        self.root.geometry(f"{window_width}x{window_height}+{x_pos}+{y_pos}")
+        self.root.configure(bg='#f0f0f0')
+        self._setup_system_fonts()
+        self._create_widgets()
+        self.checker = MTProtoChecker()
+        self.batch_results = []
+        self.github_results = []
+        self.batch_running = False
+        self.single_result = None
+        self.gui_queue = queue.Queue()
+        self.processed_count = 0
+        self.total_to_process = 0
+        self._stop_requested = False
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self.single_link_entry.focus_set()
+
+    def _setup_system_fonts(self):
+        self.system_font = "TkDefaultFont"
+        self.header_font = ("TkDefaultFont", 14, "bold")
+        self.mono_font = ("TkDefaultFont", 10)
+        try:
+            os_name = platform.system()
+            if os_name == "Windows":
+                self.system_font = "Segoe UI"
+                self.header_font = ("Segoe UI", 14, "bold")
+                self.mono_font = ("Consolas", 10)
+            elif os_name == "Darwin":
+                self.system_font = "Helvetica"
+                self.header_font = ("Helvetica", 14, "bold")
+                self.mono_font = ("Menlo", 10)
+            elif os_name == "Linux":
+                self.system_font = "DejaVu Sans"
+                self.header_font = ("DejaVu Sans", 14, "bold")
+                self.mono_font = ("DejaVu Sans Mono", 10)
+        except Exception:
+            pass
+
+    def _on_tab_changed(self, event):
+        if self.notebook.index("current") == 0:
+            self.single_link_entry.focus_set()
+
+    def _open_mt_channel(self):
+        webbrowser.open("https://t.me/D1edfr0mglitch3s")
+
+    def _create_widgets(self):
+        main_frame = ttk.Frame(self.root, padding="8")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        header_frame = ttk.Frame(main_frame)
+        header_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(header_frame, text="Проверка Telegram прокси", font=self.header_font).pack(side=tk.LEFT)
+        mt_button = tk.Button(header_frame, text="BY MT", bg="purple", fg="white", command=self._open_mt_channel)
+        mt_button.pack(side=tk.RIGHT)
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+        self.single_tab = ttk.Frame(self.notebook)
+        self.batch_tab = ttk.Frame(self.notebook)
+        self.github_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.single_tab, text="Одиночная проверка")
+        self.notebook.add(self.batch_tab, text="Пакетная проверка")
+        self.notebook.add(self.github_tab, text="GitHub Источники")
+        self._build_single_tab()
+        self._build_batch_tab()
+        self._build_github_tab()
+        status_frame = ttk.Frame(main_frame)
+        status_frame.pack(fill=tk.X, pady=(5, 0))
+        self.status_var = tk.StringVar(value="Готов к работе")
+        ttk.Label(status_frame, textvariable=self.status_var, anchor=tk.W, font=(self.system_font, 9)).pack(fill=tk.X, side=tk.LEFT, expand=True)
+        self.progress = ttk.Progressbar(status_frame, mode='indeterminate', length=100)
+        self.progress.pack(side=tk.RIGHT, padx=(5, 0))
+
+    def _on_paste(self, event=None):
+        try:
+            clipboard_text = self.root.clipboard_get()
+        except Exception:
+            return "break"
+        clean_text = clipboard_text.replace('\n', '').replace('\r', '').strip()
+        self.single_link_entry.delete(0, tk.END)
+        self.single_link_entry.insert(0, clean_text)
+        return "break"
+
+    def _show_entry_context_menu(self, event):
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Вырезать", command=lambda: self.single_link_entry.event_generate("<<Cut>>"))
+        menu.add_command(label="Копировать", command=lambda: self.single_link_entry.event_generate("<<Copy>>"))
+        menu.add_command(label="Вставить", command=self._on_paste)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _on_treeview_right_click(self, event):
+        tree = self.single_tree
+        item = tree.identify_row(event.y)
+        if not item: return
+        tree.selection_set(item)
+        value = tree.item(item, "values")[1]
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Копировать значение", command=lambda: self._copy_to_clipboard(value))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _copy_to_clipboard(self, text):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status_var.set(f"Скопировано: {text}")
+
+    def _build_single_tab(self):
+        tab = self.single_tab
+        input_frame = ttk.LabelFrame(tab, text="Ссылка на прокси", padding="8")
+        input_frame.pack(fill=tk.X, padx=5, pady=5)
+        top_row = ttk.Frame(input_frame)
+        top_row.pack(fill=tk.X)
+        self.single_link_entry = ttk.Entry(top_row, font=self.mono_font)
+        self.single_link_entry.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(0, 5))
+        self.single_link_entry.bind('<Return>', lambda e: self.start_single_check())
+        self.single_link_entry.bind('<Button-3>', self._show_entry_context_menu)
+        self.single_link_entry.bind('<Control-v>', self._on_paste)
+        self.single_link_entry.bind('<Shift-Insert>', self._on_paste)
+        ttk.Button(top_row, text="Проверить", command=self.start_single_check).pack(side=tk.RIGHT)
+        results_frame = ttk.LabelFrame(tab, text="Результаты проверки", padding="8")
+        results_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        columns = ("parameter", "value", "status")
+        self.single_tree = ttk.Treeview(results_frame, columns=columns, show="headings", height=14)
+        self.single_tree.heading("parameter", text="Параметр")
+        self.single_tree.heading("value", text="Значение")
+        self.single_tree.heading("status", text="Статус")
+        self.single_tree.column("parameter", width=220, minwidth=160)
+        self.single_tree.column("value", width=400, minwidth=300)
+        self.single_tree.column("status", width=120, minwidth=90, anchor="center")
+        self.single_tree.bind("<Button-3>", self._on_treeview_right_click)
+        self.single_tree.tag_configure('ok', foreground='#1a7a1a')
+        self.single_tree.tag_configure('error', foreground='#cc0000')
+        self.single_tree.tag_configure('warning', foreground='#c47600')
+        self.single_tree.tag_configure('info', foreground='#000000')
+        scrollbar = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.single_tree.yview)
+        self.single_tree.configure(yscroll=scrollbar.set)
+        self.single_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        btn_frame = ttk.Frame(tab)
+        btn_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        ttk.Button(btn_frame, text="Экспорт TXT", command=self.export_single_result).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Экспорт JSON", command=self.export_single_json).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Очистить", command=self.clear_single_results).pack(side=tk.LEFT, padx=2)
+
+    def _build_batch_tab(self):
+        tab = self.batch_tab
+        control_frame = ttk.LabelFrame(tab, text="Управление пакетной проверкой", padding="8")
+        control_frame.pack(fill=tk.X, padx=5, pady=5)
+        btn_frame_top = ttk.Frame(control_frame)
+        btn_frame_top.pack(fill=tk.X)
+        left_btns = ttk.Frame(btn_frame_top)
+        left_btns.pack(side=tk.LEFT)
+        ttk.Button(left_btns, text="Загрузить из файла", command=self.load_batch_file).pack(side=tk.LEFT, padx=2)
+        self.batch_start_btn = ttk.Button(left_btns, text="Начать проверку", command=self.start_batch_check, state=tk.DISABLED)
+        self.batch_start_btn.pack(side=tk.LEFT, padx=2)
+        self.batch_stop_btn = ttk.Button(left_btns, text="Остановить", command=self.stop_batch_check, state=tk.DISABLED)
+        self.batch_stop_btn.pack(side=tk.LEFT, padx=2)
+        right_info = ttk.Frame(btn_frame_top)
+        right_info.pack(side=tk.RIGHT)  
+        self.batch_count_var = tk.StringVar(value="Прокси: 0")
+        ttk.Label(right_info, textvariable=self.batch_count_var).pack(side=tk.LEFT, padx=5)
+        self.batch_progress_var = tk.StringVar(value="Готово: 0/0")
+        ttk.Label(right_info, textvariable=self.batch_progress_var).pack(side=tk.LEFT, padx=5)
+        results_frame = ttk.LabelFrame(tab, text="Результаты пакетной проверки", padding="8")
+        results_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        columns = ("status_icon", "server", "port", "protocol", "ping", "jitter", "carriers", "mtproto", "whitelist", "country", "score")
+        self.batch_tree = ttk.Treeview(results_frame, columns=columns, show="headings", height=12)
+        for col, title, w, anchor in [
+            ("status_icon", "", 45, "center"),
+            ("server", "Сервер", 110, "w"),
+            ("port", "Порт", 50, "center"),
+            ("protocol", "Протокол", 80, "center"),
+            ("ping", "Пинг", 50, "center"),
+            ("jitter", "Джитер", 50, "center"),
+            ("carriers", "Операторы", 140, "center"),
+            ("mtproto", "Handshake", 70, "center"),
+            ("whitelist", "БС", 55, "center"),
+            ("country", "Страна", 75, "w"),
+            ("score", "Оценка", 50, "center"),
+        ]:
+            self.batch_tree.heading(col, text=title)
+            self.batch_tree.column(col, width=w, anchor=anchor)
+        self.batch_tree.tag_configure('ok', foreground='#1a7a1a')
+        self.batch_tree.tag_configure('fail', foreground='#cc0000')
+        self.batch_tree.tag_configure('ban', foreground='#c47600')
+        v_scroll = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.batch_tree.yview)
+        h_scroll = ttk.Scrollbar(results_frame, orient=tk.HORIZONTAL, command=self.batch_tree.xview)
+        self.batch_tree.configure(yscroll=v_scroll.set, xscroll=h_scroll.set)
+        self.batch_tree.grid(row=0, column=0, sticky='nsew')
+        v_scroll.grid(row=0, column=1, sticky='ns')
+        h_scroll.grid(row=1, column=0, sticky='ew')
+        results_frame.grid_rowconfigure(0, weight=1)
+        results_frame.grid_columnconfigure(0, weight=1)
+        btn_frame_bottom = ttk.Frame(tab)
+        btn_frame_bottom.pack(fill=tk.X, padx=5, pady=(0, 5))
+        ttk.Button(btn_frame_bottom, text="Экспорт выбранных TXT", command=self.export_selected_batch).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame_bottom, text="Экспорт всех TXT", command=self.export_all_batch).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame_bottom, text="Экспорт всех JSON", command=self.export_all_batch_json).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame_bottom, text="Очистить таблицу", command=self.clear_batch_results).pack(side=tk.LEFT, padx=2)
+
+    def _build_github_tab(self):
+        tab = self.github_tab
+        control_frame = ttk.LabelFrame(tab, text="Управление GitHub источниками", padding="8")
+        control_frame.pack(fill=tk.X, padx=5, pady=5)
+        btn_frame = ttk.Frame(control_frame)
+        btn_frame.pack(fill=tk.X)
+        self.github_fetch_btn = ttk.Button(btn_frame, text="Загрузить и проверить Топ-15", command=self.start_github_check)
+        self.github_fetch_btn.pack(side=tk.LEFT, padx=2)
+        self.github_count_var = tk.StringVar(value="Найдено: 0")
+        ttk.Label(btn_frame, textvariable=self.github_count_var).pack(side=tk.RIGHT, padx=5)
+        results_frame = ttk.LabelFrame(tab, text="Результаты (Топ-15)", padding="8")
+        results_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        columns = ("rank", "server", "port", "protocol", "ping", "score", "country")
+        self.github_tree = ttk.Treeview(results_frame, columns=columns, show="headings", height=15)
+        for col, title, w, anchor in [
+            ("rank", "#", 40, "center"),
+            ("server", "Сервер", 150, "w"),
+            ("port", "Порт", 60, "center"),
+            ("protocol", "Протокол", 100, "center"),
+            ("ping", "Пинг", 60, "center"),
+            ("score", "Оценка", 60, "center"),
+            ("country", "Страна", 80, "w"),
+        ]:
+            self.github_tree.heading(col, text=title)
+            self.github_tree.column(col, width=w, anchor=anchor)
+        v_scroll = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.github_tree.yview)
+        self.github_tree.configure(yscroll=v_scroll.set)
+        self.github_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        btn_frame_bottom = ttk.Frame(tab)
+        btn_frame_bottom.pack(fill=tk.X, padx=5, pady=(0, 5))
+        ttk.Button(btn_frame_bottom, text="Экспорт TXT", command=self.export_github_txt).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame_bottom, text="Экспорт JSON", command=self.export_github_json).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame_bottom, text="Очистить", command=self.clear_github_results).pack(side=tk.LEFT, padx=2)
+
+    def _try_extract_server_port(self, link: str) -> Tuple[str, str]:
+        try:
+            parsed = urllib.parse.urlparse(link)
+            params = urllib.parse.parse_qs(parsed.query)
+            return params.get('server', ['N/A'])[0], params.get('port', ['N/A'])[0]
+        except Exception:
+            pass
+        try:
+            match = re.search(r'server=([^&]+)&port=(\d+)', link)
+            if match:
+                return match.group(1), match.group(2)
+        except Exception:
+            pass
+        return 'N/A', 'N/A'
+
+    def start_single_check(self):
+        link = self.single_link_entry.get().strip()
+        if not link:
+            messagebox.showwarning("Внимание", "Введите ссылку на прокси!")
+            return
+        self.status_var.set("Проверка...")
+        self.clear_single_results()
+        self.progress.start(15)
+        threading.Thread(target=self._run_single_check, args=(link,), daemon=True).start()
+
+    def _run_single_check(self, link: str):
+        def add(param, value, status):
+            status_map = {
+                "success": "[OK]", "error": "[FAIL]",
+                "warning": "[WARN]", "info": "[*]"
+            }
+            status_text = status_map.get(status, "[?]")
+            self.root.after(
+                0, lambda p=param, v=value, s=status, st=status_text: self.single_tree.insert(
+                    "", tk.END, values=(p, v, f"{st} {s}"), tags=(s,)
+                )
+            )
+        try:
+            add("Ссылка", link, "info")
+            valid, result = self.checker.check_single(link)
+            proxy = result.get('proxy')
+            if proxy:
+                add("Парсинг ссылки", "Успешно", "success")
+                add("Сервер", proxy['server'], "info")
+                add("Порт", str(proxy['port']), "info")
+                add("Протокол", proxy.get('protocol', 'N/A').upper(), "info")
+                if proxy.get('type') == 'socks5':
+                    add("Тип", "SOCKS5", "info")
+                else:
+                    add("Тип обфускации", result['proxy_type'], "info")
+                    whitelist_status = result.get('whitelist_status', 'N/A')
+                    add("Статус белых списков", whitelist_status, "success" if result.get('is_whitelist') else "warning")
+                    bs_compat = result.get('bs_compat_info', {})
+                    if bs_compat.get('is_bs_compat'):
+                        add("БС-совместимый", f"{bs_compat.get('service_name', 'N/A')} ({bs_compat.get('compat_source', 'N/A')})", "success")
+                    if bs_compat.get('is_blocked_sni'):
+                        add("Заблокированный SNI", f"{bs_compat.get('service_name', 'N/A')} - не подходит для РФ", "error")
+            else:
+                add("Парсинг ссылки", "Неудачно", "error")
+            if proxy and proxy.get('type') != 'socks5':
+                secret_info = result.get('secret_info', {})
+                if secret_info:
+                    add("Длина секрета", f"{secret_info.get('length', 0)} символов", "info")
+                    add("Тип секрета", secret_info.get('type', 'unknown').upper(), "info")
+                    hex_valid = secret_info.get('hex_valid', False)
+                    add("HEX валидация", "Валидный" if hex_valid else "Невалидный", "success" if hex_valid else "error")
+                    add("Secret статус", result.get('secret_msg', 'N/A'), "success" if result.get('secret_valid') else "error")
+                    if proxy.get('secret', '').startswith('ee'):
+                        sni = _decode_domain(proxy['secret'])
+                        if sni:
+                            add("SNI домен (Fake-TLS)", sni, "info")
+            add("DNS разрешение", result.get('dns_status', 'N/A'), "success" if result.get('ip') else "error")
+            if result.get('ip'):
+                add("IP адрес", result['ip'], "success")
+            add("Статус порта", result.get('port_status', 'N/A'), "success" if result.get('port_open') else "error")
+            if result.get('ping') is not None:
+                color = "success" if result['ping'] < 200 else "warning" if result['ping'] < 500 else "error"
+                j_str = f" (Джиттер: {result.get('jitter')} мс)" if result.get('jitter') is not None else ""
+                add("Пинг (мс)", f"{result['ping']}{j_str}", color)
+            else:
+                add("Пинг (мс)", result.get('ping_status', 'N/A'), "warning")
+            add("Рукопожатие", result.get('mtproto_msg', 'N/A'), "success" if result.get('mtproto_ok') else "error")
+            carriers = result.get('carriers', {})
+            if carriers:
+                c_str = f"МТС:{'+' if carriers.get('MTS') else '-'} БИЛ:{'+' if carriers.get('Beeline') else '-'} МЕГ:{'+' if carriers.get('Megafon') else '-'} ТЕЛ2:{'+' if carriers.get('Tele2') else '-'}"
+                add("Маскировка операторов", c_str, "success" if any(carriers.values()) else "error")
+            advanced = result.get('advanced_test', {})
+            if advanced:
+                if advanced.get('tcp_connect'):
+                    add("TCP соединение", "Установлено", "success")
+                if advanced.get('tcp_latency'):
+                    add("TCP задержка (мс)", f"{advanced['tcp_latency']}", "info")
+                if advanced.get('ssl_test'):
+                    add("SSL/TLS тест", "Поддерживается", "info")
+                if advanced.get('http_probe'):
+                    add("HTTP проба", "Отвечает", "info")
+                if advanced.get('response_time'):
+                    add("Время отклика (мс)", f"{advanced['response_time']}", "info")
+            geo = result.get('geo', {})
+            if 'error' not in geo:
+                add("Страна", f"{geo.get('country', 'N/A')} ({geo.get('countryCode', 'N/A')})", "info")
+                add("Регион", f"{geo.get('region', 'N/A')} ({geo.get('regionCode', 'N/A')})", "info")
+                add("Город", geo.get('city', 'N/A'), "info")
+                add("Индекс", geo.get('zip', 'N/A'), "info")
+                add("Провайдер (ISP)", geo.get('isp', 'N/A'), "info")
+                add("Организация", geo.get('org', 'N/A'), "info")
+                add("AS", geo.get('as', 'N/A'), "info")
+                add("Часовой пояс", geo.get('timezone', 'N/A'), "info")
+                add("Координаты", f"{geo.get('lat', 'N/A')}, {geo.get('lon', 'N/A')}", "info")
+                if geo.get('proxy'):
+                    add("Тип IP", "Proxy/VPN", "warning")
+                if geo.get('hosting'):
+                    add("Хостинг", "Да (дата-центр)", "warning")
+                if geo.get('mobile'):
+                    add("Мобильная сеть", "Да", "warning")
+            else:
+                add("Геолокация", geo.get('error', 'N/A'), "error")
+            score = result.get('connection_score', 0)
+            add("Оценка качества", f"{score}/100", "success" if score >= 75 else "warning" if score >= 50 else "error")
+            if valid:
+                add("ИТОГ", "ПРОКСИ РАБОЧИЙ", "success")
+                self.root.after(0, lambda: self.status_var.set("Проверка завершена успешно"))
+            else:
+                error_msg = result.get('error', 'Неизвестная ошибка')
+                add("ИТОГ", f"ОШИБКА: {error_msg}", "error")
+                self.root.after(0, lambda: self.status_var.set("Проверка завершена с ошибками"))
+            self.single_result = result
+        except Exception as e:
+            add("Критическая ошибка", str(e)[:100], "error")
+            self.root.after(0, lambda: self.status_var.set(f"Ошибка: {e}"))
+        finally:
+            self.root.after(0, self.progress.stop)
+
+    def clear_single_results(self):
+        for item in self.single_tree.get_children():
+            self.single_tree.delete(item)
+        self.single_result = None
+        self.status_var.set("Результаты очищены")
+
+    def _write_full_proxy_report(self, f, idx, result):
+        f.write(f"{idx}. ССЫЛКА: {result.get('link', 'N/A')}\n\n")
+        if result.get('proxy'):
+            proxy = result['proxy']
+            f.write(f"   Сервер: {proxy.get('server', 'N/A')}\n")
+            f.write(f"   Порт: {proxy.get('port', 'N/A')}\n")
+            f.write(f"   Протокол: {proxy.get('protocol', 'N/A').upper()}\n")
+            if proxy.get('type') == 'socks5':
+                f.write("   Тип: SOCKS5\n")
+            else:
+                f.write(f"   Тип обфускации: {result.get('proxy_type', 'N/A')}\n")
+                f.write(f"   Тип секрета: {result.get('secret_info', {}).get('type', 'N/A').upper()}\n")
+                if proxy.get('secret', '').startswith('ee'):
+                    sni = _decode_domain(proxy['secret'])
+                    if sni:
+                        f.write(f"   SNI домен: {sni}\n")
+        f.write(f"\n   IP адрес: {result.get('ip', 'N/A')}\n")
+        f.write(f"   DNS статус: {result.get('dns_status', 'N/A')}\n")
+        f.write(f"   Статус порта: {result.get('port_status', 'N/A')}\n")
+        if result.get('ping') is not None:
+            f.write(f"   Пинг: {result.get('ping')} мс (Джиттер: {result.get('jitter')} мс)\n")
+        else:
+            f.write(f"   Пинг: {result.get('ping_status', 'N/A')}\n")
+        f.write(f"   Рукопожатие: {result.get('mtproto_msg', 'N/A')}\n")
+        carriers = result.get('carriers', {})
+        if carriers:
+            c_str = f"МТС:{'+' if carriers.get('MTS') else '-'} БИЛ:{'+' if carriers.get('Beeline') else '-'} МЕГ:{'+' if carriers.get('Megafon') else '-'} ТЕЛ2:{'+' if carriers.get('Tele2') else '-'}"
+            f.write(f"   Операторы: {c_str}\n")
+        f.write(f"   Оценка: {result.get('connection_score', 0)}/100\n")
+        geo = result.get('geo', {})
+        if isinstance(geo, dict) and 'error' not in geo:
+            f.write(f"   Страна: {geo.get('country', 'N/A')} ({geo.get('countryCode', 'N/A')})\n")
+            f.write(f"   Регион: {geo.get('region', 'N/A')} ({geo.get('regionCode', 'N/A')})\n")
+            f.write(f"   Город: {geo.get('city', 'N/A')}\n")
+            f.write(f"   Индекс: {geo.get('zip', 'N/A')}\n")
+            f.write(f"   Провайдер: {geo.get('isp', 'N/A')}\n")
+            f.write(f"   Организация: {geo.get('org', 'N/A')}\n")
+            f.write(f"   AS: {geo.get('as', 'N/A')}\n")
+            f.write(f"   Часовой пояс: {geo.get('timezone', 'N/A')}\n")
+            f.write(f"   Координаты: {geo.get('lat', 'N/A')}, {geo.get('lon', 'N/A')}\n")
+            if geo.get('proxy'):
+                f.write("   Тип IP: Proxy/VPN\n")
+            if geo.get('hosting'):
+                f.write("   Хостинг: Да (дата-центр)\n")
+            if geo.get('mobile'):
+                f.write("   Мобильная сеть: Да\n")
+        advanced = result.get('advanced_test', {})
+        if advanced and advanced.get('tcp_connect'):
+            f.write(f"   TCP задержка: {advanced.get('tcp_latency', 'N/A')} мс\n")
+        if result.get('proxy', {}).get('type') != 'socks5':
+            f.write(f"\n   Белый список: {result.get('whitelist_status', 'N/A')}\n")
+            f.write(f"   В БС: {'Да' if result.get('is_whitelist') else 'Нет'}\n")
+            bs_compat = result.get('bs_compat_info', {})
+            if bs_compat.get('is_bs_compat'):
+                f.write(f"   БС-совместимый: {bs_compat.get('service_name', 'N/A')} ({bs_compat.get('compat_source', 'N/A')})\n")
+            if bs_compat.get('is_blocked_sni'):
+                f.write(f"   Заблокированный SNI: {bs_compat.get('service_name', 'N/A')}\n")
+        f.write(f"\n   Статус: {'РАБОЧИЙ' if result.get('valid') else 'НЕРАБОЧИЙ'}\n")
+        if result.get('error'):
+            f.write(f"   Ошибка: {result.get('error')}\n")
+        f.write("\n" + "=" * 100 + "\n\n")
+
+    def export_single_result(self):
+        if not self.single_result:
+            messagebox.showwarning("Внимание", "Нет результатов для экспорта!")
+            return
+        filepath = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
+        if not filepath: return
+        try:
+            res = self.single_result
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f"Отчёт проверки TG прокси v{VERSION}\n")
+                f.write(f"Сгенерирован: {res.get('timestamp', 'N/A')}\n")
+                f.write("=" * 100 + "\n\n")
+                working_list = [res] if res.get('valid') else []
+                failed_list = [res] if not res.get('valid') else []
+                if working_list:
+                    f.write("=== РАБОЧИЕ ПРОКСИ ===\n\n")
+                    for idx, result in enumerate(working_list, 1):
+                        self._write_full_proxy_report(f, idx, result)
+                if failed_list:
+                    f.write("=== НЕРАБОЧИЕ ПРОКСИ ===\n\n")
+                    for idx, result in enumerate(failed_list, 1):
+                        self._write_full_proxy_report(f, idx, result)
+            messagebox.showinfo("Успех", f"Результат сохранен:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def export_single_json(self):
+        if not self.single_result:
+            messagebox.showwarning("Внимание", "Нет результатов для экспорта!")
+            return
+        filepath = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+        if not filepath: return
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(self.single_result, f, ensure_ascii=False, indent=2, default=str)
+            messagebox.showinfo("Успех", f"Результат сохранен:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def load_batch_file(self):
+        filepath = filedialog.askopenfilename(filetypes=[("Text files", "*.txt"), ("JSON files", "*.json"), ("All files", "*.*")])
+        if not filepath: return
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                text_content = f.read()
+            valid_links = self.checker.extract_proxies_from_text(text_content)
+            unique_links = []
+            seen_proxies = set()
+            duplicates_count = 0
+            for link in valid_links:
+                proxy_data = self.checker.parse_proxy_link(link)
+                if proxy_data:
+                    proxy_key = (
+                        proxy_data.get('type'),
+                        proxy_data.get('server'),
+                        proxy_data.get('port'),
+                        proxy_data.get('secret'),
+                        proxy_data.get('user'),
+                        proxy_data.get('password')
+                    )
+                    if proxy_key not in seen_proxies:
+                        seen_proxies.add(proxy_key)
+                        unique_links.append(link)
+                    else:
+                        duplicates_count += 1
+            self.batch_results = []
+            for item in self.batch_tree.get_children():
+                self.batch_tree.delete(item)
+            self.batch_links = unique_links
+            self.batch_count_var.set(f"Прокси: {len(unique_links)} (Удалено дублей: {duplicates_count})")
+            self.batch_progress_var.set(f"Готово: 0/{len(unique_links)}")
+            self.batch_start_btn.config(state=tk.NORMAL if unique_links else tk.DISABLED)
+            messagebox.showinfo("Загрузка", f"Извлечено валидных прокси: {len(valid_links)}\nУникальных: {len(unique_links)}\nДубликатов удалено: {duplicates_count}")
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def start_batch_check(self):
+        if not hasattr(self, 'batch_links') or not self.batch_links: return
+        self.batch_running = True
+        self._stop_requested = False
+        self.batch_start_btn.config(state=tk.DISABLED)
+        self.batch_stop_btn.config(state=tk.NORMAL)
+        self.progress.start(15)
+        self.status_var.set("Пакетная проверка...")
+        self.batch_results = []
+        for item in self.batch_tree.get_children():
+            self.batch_tree.delete(item)
+        while not self.gui_queue.empty():
+            try:
+                self.gui_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.processed_count = 0
+        self.total_to_process = len(self.batch_links)
+        self._process_gui_queue()
+        threading.Thread(target=self._run_batch_check, daemon=True).start()
+
+    def stop_batch_check(self):
+        self._stop_requested = True
+        self.batch_running = False
+        self.progress.stop()
+        self.status_var.set("Проверка остановлена пользователем")
+        self.batch_start_btn.config(state=tk.NORMAL)
+        self.batch_stop_btn.config(state=tk.DISABLED)
+        self.root.update_idletasks()
+
+    def _process_gui_queue(self):
+        items_processed = 0
+        while not self.gui_queue.empty() and items_processed < 50:
+            try:
+                result = self.gui_queue.get_nowait()
+                valid = result.get('valid', False)
+                if valid:
+                    status_icon = "[OK]"
+                    row_tag = 'ok'
+                elif result.get('error') and 'Заблокированный' in str(result.get('error', '')):
+                    status_icon = "[BAN]"
+                    row_tag = 'ban'
+                else:
+                    status_icon = "[FAIL]"
+                    row_tag = 'fail'
+                proxy = result.get('proxy', {})
+                if proxy and proxy.get('server'):
+                    server = proxy['server']
+                    port = str(proxy['port'])
+                    protocol = proxy.get('protocol', 'N/A').upper()
+                else:
+                    server, port = self._try_extract_server_port(result.get('link', ''))
+                    protocol = 'N/A'
+                ping = result.get('ping')
+                jitter = result.get('jitter')
+                ping_str = f"{ping:.0f}" if ping is not None else "N/A"
+                jitter_str = f"{jitter:.0f}" if jitter is not None else "N/A"
+                mtproto_str = "[OK]" if result.get('mtproto_ok') else "[FAIL]"
+                carriers = result.get('carriers', {})
+                c_str = "N/A"
+                if carriers:
+                    c_str = f"М:{'+' if carriers.get('MTS') else '-'} Б:{'+' if carriers.get('Beeline') else '-'} МГ:{'+' if carriers.get('Megafon') else '-'} Т2:{'+' if carriers.get('Tele2') else '-'}"
+                wl_str = "[БС]" if result.get('is_whitelist') else "Нет"
+                geo = result.get('geo', {})
+                if isinstance(geo, dict) and 'error' not in geo:
+                    country = geo.get('country', 'N/A')
+                else:
+                    country = 'N/A'
+                score = result.get('connection_score', 0)
+                self.batch_tree.insert("", tk.END, tags=(row_tag,), values=(
+                    status_icon, server, port, protocol, ping_str, jitter_str, c_str,
+                    mtproto_str, wl_str, country, score
+                ))
+                self.batch_results.append(result)
+                self.processed_count += 1
+                items_processed += 1
+            except queue.Empty:
+                break
+        self.batch_progress_var.set(f"Готово: {self.processed_count}/{self.total_to_process}")
+        if self._stop_requested:
+            self._batch_check_finished()
+            return
+        if self.batch_running or not self.gui_queue.empty():
+            self.root.after(100, self._process_gui_queue)
+        else:
+            self._batch_check_finished()
+
+    def _run_batch_check(self):
+        links = self.batch_links
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_link = {executor.submit(self.checker.check_single, link): link for link in links}
+            for future in as_completed(future_to_link):
+                if self._stop_requested:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                try:
+                    valid, result = future.result()
+                except Exception as e:
+                    result = {'link': future_to_link[future], 'valid': False, 'error': str(e)[:100]}
+                self.gui_queue.put(result)
+        self.batch_running = False
+
+    def _batch_check_finished(self):
+        self.progress.stop()
+        self.batch_start_btn.config(state=tk.NORMAL)
+        self.batch_stop_btn.config(state=tk.DISABLED)
+        if self.batch_results:
+            working = sum(1 for r in self.batch_results if r.get('valid'))
+            whitelist = sum(1 for r in self.batch_results if r.get('is_whitelist'))
+            self.status_var.set(f"Готово. Рабочих: {working}/{len(self.batch_results)}, В БС: {whitelist}")
+        self.batch_results.sort(key=lambda r: (not r.get('valid', False), -r.get('connection_score', 0)))
+        for item in self.batch_tree.get_children():
+            self.batch_tree.delete(item)
+        for result in self.batch_results:
+            valid = result.get('valid', False)
+            if valid:
+                status_icon, row_tag = "[OK]", 'ok'
+            elif result.get('error') and 'Заблокированный' in str(result.get('error', '')):
+                status_icon, row_tag = "[BAN]", 'ban'
+            else:
+                status_icon, row_tag = "[FAIL]", 'fail'
+            proxy = result.get('proxy', {})
+            if proxy and proxy.get('server'):
+                server = proxy['server']
+                port = str(proxy['port'])
+                protocol = proxy.get('protocol', 'N/A').upper()
+            else:
+                server, port = self._try_extract_server_port(result.get('link', ''))
+                protocol = 'N/A'
+            ping = result.get('ping')
+            jitter = result.get('jitter')
+            ping_str = f"{ping:.0f}" if ping is not None else "N/A"
+            jitter_str = f"{jitter:.0f}" if jitter is not None else "N/A"
+            mtproto_str = "[OK]" if result.get('mtproto_ok') else "[FAIL]"
+            carriers = result.get('carriers', {})
+            c_str = "N/A"
+            if carriers:
+                c_str = f"М:{'+' if carriers.get('MTS') else '-'} Б:{'+' if carriers.get('Beeline') else '-'} МГ:{'+' if carriers.get('Megafon') else '-'} Т2:{'+' if carriers.get('Tele2') else '-'}"
+            wl_str = "[БС]" if result.get('is_whitelist') else "Нет"
+            geo = result.get('geo', {})
+            country = geo.get('country', 'N/A') if isinstance(geo, dict) and 'error' not in geo else 'N/A'
+            score = result.get('connection_score', 0)
+            self.batch_tree.insert("", tk.END, tags=(row_tag,), values=(
+                status_icon, server, port, protocol, ping_str, jitter_str, c_str,
+                mtproto_str, wl_str, country, score
+            ))
+
+    def start_github_check(self):
+        self.github_fetch_btn.config(state=tk.DISABLED)
+        self.progress.start(15)
+        self.status_var.set("Загрузка и проверка GitHub прокси...")
+        threading.Thread(target=self._run_github_check, daemon=True).start()
+
+    def _run_github_check(self):
+        try:
+            raw_proxies = self.checker.fetch_github_proxies()
+            self.root.after(0, lambda: self.github_count_var.set(f"Найдено: {len(raw_proxies)}"))
+            valid_results = []
+            total = len(raw_proxies)
+            completed = 0
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS * 3) as executor:
+                future_to_link = {executor.submit(self.checker.check_single_fast, link): link for link in raw_proxies}
+                for future in as_completed(future_to_link):
+                    try:
+                        is_valid, result = future.result()
+                        if is_valid:
+                            valid_results.append(result)
+                    except Exception:
+                        pass
+                    completed += 1
+            valid_results.sort(key=lambda x: x.get('connection_score', 0), reverse=True)
+            top_results = valid_results[:15]
+            self.github_results = top_results
+            self.root.after(0, self._populate_github_tree, top_results)
+            self.root.after(0, lambda: self.status_var.set(f"Готово. Найдено лучших: {len(top_results)}"))
+        except Exception as e:
+            self.root.after(0, lambda: self.status_var.set(f"Ошибка: {e}"))
+        finally:
+            self.root.after(0, self.progress.stop)
+            self.root.after(0, lambda: self.github_fetch_btn.config(state=tk.NORMAL))
+
+    def _populate_github_tree(self, results):
+        for item in self.github_tree.get_children():
+            self.github_tree.delete(item)
+        for i, res in enumerate(results, 1):
+            proxy = res.get('proxy', {})
+            server = proxy.get('server', 'N/A')
+            port = proxy.get('port', 'N/A')
+            protocol = proxy.get('protocol', 'N/A').upper()
+            ping = res.get('ping')
+            ping_str = f"{ping:.0f}" if ping is not None else "N/A"
+            score = res.get('connection_score', 0)
+            geo = res.get('geo', {})
+            country = geo.get('country', 'N/A') if isinstance(geo, dict) else 'N/A'
+            self.github_tree.insert("", tk.END, values=(i, server, port, protocol, ping_str, score, country), tags=('ok',))
+
+    def clear_github_results(self):
+        for item in self.github_tree.get_children():
+            self.github_tree.delete(item)
+        self.github_results = []
+        self.github_count_var.set("Найдено: 0")
+
+    def export_github_txt(self):
+        if not hasattr(self, 'github_results') or not self.github_results:
+            messagebox.showwarning("Внимание", "Нет результатов для экспорта!")
+            return
+        filepath = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
+        if not filepath: return
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f"Отчёт проверки GitHub TG прокси v{VERSION}\n")
+                f.write(f"Сгенерирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 100 + "\n\n")
+                for idx, result in enumerate(self.github_results, 1):
+                    self._write_full_proxy_report(f, idx, result)
+            messagebox.showinfo("Успех", f"Результаты сохранены:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def export_github_json(self):
+        if not hasattr(self, 'github_results') or not self.github_results:
+            messagebox.showwarning("Внимание", "Нет результатов для экспорта!")
+            return
+        filepath = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+        if not filepath: return
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(self.github_results, f, ensure_ascii=False, indent=2, default=str)
+            messagebox.showinfo("Успех", f"Результаты сохранены:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def export_selected_batch(self):
+        selected_items = self.batch_tree.selection()
+        if not selected_items:
+            messagebox.showinfo("Информация", "Выберите строки для экспорта!")
+            return
+        filepath = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
+        if not filepath: return
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f"Отчёт проверки TG прокси v{VERSION}\n")
+                f.write(f"Сгенерирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 100 + "\n\n")
+                selected_results = []
+                for item_id in selected_items:
+                    vals = self.batch_tree.item(item_id, 'values')
+                    if len(vals) >= 3:
+                        server, port = vals[1], vals[2]
+                        matched = False
+                        for r in self.batch_results:
+                            p = r.get('proxy') or {}
+                            if p.get('server') == server and str(p.get('port')) == str(port):
+                                selected_results.append(r)
+                                matched = True
+                                break
+                        if not matched:
+                            item_index = self.batch_tree.index(item_id)
+                            if item_index < len(self.batch_results):
+                                selected_results.append(self.batch_results[item_index])
+                    else:
+                        item_index = self.batch_tree.index(item_id)
+                        if item_index < len(self.batch_results):
+                            selected_results.append(self.batch_results[item_index])
+                working_list = [r for r in selected_results if r.get('valid')]
+                failed_list = [r for r in selected_results if not r.get('valid')]
+                if working_list:
+                    f.write("=== РАБОЧИЕ ПРОКСИ ===\n\n")
+                    for idx, result in enumerate(working_list, 1):
+                        self._write_full_proxy_report(f, idx, result)
+                if failed_list:
+                    f.write("=== НЕРАБОЧИЕ ПРОКСИ ===\n\n")
+                    for idx, result in enumerate(failed_list, 1):
+                        self._write_full_proxy_report(f, idx, result)
+            messagebox.showinfo("Успех", f"Результаты сохранены:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def export_all_batch(self):
+        if not self.batch_results:
+            messagebox.showinfo("Информация", "Нет результатов для экспорта!")
+            return
+        filepath = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
+        if not filepath: return
+        try:
+            working = sum(1 for r in self.batch_results if r.get('valid'))
+            whitelist = sum(1 for r in self.batch_results if r.get('is_whitelist'))
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f"Отчёт проверки TG прокси v{VERSION}\n")
+                f.write(f"Сгенерирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Всего проверено: {len(self.batch_results)}\n")
+                f.write(f"Рабочих: {working}\n")
+                f.write(f"В белых списках: {whitelist}\n")
+                f.write("=" * 100 + "\n\n")
+                working_list = [r for r in self.batch_results if r.get('valid')]
+                failed_list = [r for r in self.batch_results if not r.get('valid')]
+                if working_list:
+                    f.write("=== РАБОЧИЕ ПРОКСИ ===\n\n")
+                    for idx, result in enumerate(working_list, 1):
+                        self._write_full_proxy_report(f, idx, result)
+                if failed_list:
+                    f.write("=== НЕРАБОЧИЕ ПРОКСИ ===\n\n")
+                    for idx, result in enumerate(failed_list, 1):
+                        self._write_full_proxy_report(f, idx, result)
+            messagebox.showinfo("Успех", f"Результаты сохранены:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def export_all_batch_json(self):
+        if not self.batch_results:
+            messagebox.showinfo("Информация", "Нет результатов для экспорта!")
+            return
+        filepath = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+        if not filepath: return
+        try:
+            sorted_results = sorted(self.batch_results, key=lambda r: (not r.get('valid', False), -r.get('connection_score', 0)))
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(sorted_results, f, ensure_ascii=False, indent=2, default=str)
+            messagebox.showinfo("Успех", f"Результаты сохранены:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def clear_batch_results(self):
+        for item in self.batch_tree.get_children():
+            self.batch_tree.delete(item)
+        self.batch_results = []
+        self.batch_progress_var.set("Готово: 0/0")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MTProtoCheckerGUI(root)
+    root.mainloop()
+#SOFT BY MT https://mtmtglitch.carrd.co/
